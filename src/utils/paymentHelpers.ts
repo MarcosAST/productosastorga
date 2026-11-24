@@ -51,7 +51,7 @@ export function getTicketPaymentSummary(ticket: Ticket): TicketPaymentSummary {
   const saldoPendiente = Math.max(0, roundMoney(total - montoPagado));
 
   let estadoPago: EstadoPago;
-  if (saldoPendiente <= 0.01) {
+  if (total <= 0.01 || saldoPendiente <= 0.01) {
     estadoPago = 'Pagado';
   } else if (montoPagado > 0) {
     estadoPago = 'Parcial';
@@ -60,7 +60,7 @@ export function getTicketPaymentSummary(ticket: Ticket): TicketPaymentSummary {
   }
 
   return {
-    metodoPago,
+    metodoPago: total <= 0.01 && metodoPago === 'Crédito' ? 'Efectivo' : metodoPago,
     estadoPago,
     montoPagado,
     saldoPendiente: saldoPendiente <= 0.01 ? 0 : saldoPendiente,

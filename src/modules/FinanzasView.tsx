@@ -142,8 +142,9 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
 
   const fondoBase = storedMonthRecord?.fondoBase ?? 0;
   const utilidadPreliminar = ingresosMes - egresosMes;
-  const utilidadNeta = utilidadPreliminar - sueldosMes;
-  const fondoTotal = utilidadNeta + fondoBase;
+  // Solo se restan egresos para la utilidad; los sueldos quedan separados porque salen de la misma utilidad
+  const utilidadNeta = utilidadPreliminar;
+  const fondoTotal = fondoBase + ingresosMes - egresosMes - sueldosMes;
   const isClosed = storedMonthRecord?.cerrado ?? false;
   const nextMonth = getNextMonthISO(selectedMes);
 
@@ -157,7 +158,7 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
     const newBase = parseFloat(fondoBaseInput);
     if (Number.isNaN(newBase)) return;
 
-    const updatedTotal = utilidadNeta + newBase;
+    const updatedTotal = newBase + ingresosMes - egresosMes - sueldosMes;
     onRequestMutation({
       title: 'Establecer fondo base del mes',
       description: `Se guardará el Fondo Base de ${formatMonthLabel(selectedMes)} en Google Sheets.`,
@@ -210,7 +211,7 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
       .filter((s) => s.fecha.startsWith(nextMonth))
       .reduce((s, su) => s + su.monto, 0);
     const nextPrelim = nextMonthIngresos - nextMonthEgresos;
-    const nextNeta = nextPrelim - nextMonthSueldos;
+    const nextNeta = nextPrelim;
 
     const nextMonthRecord: FinanzaMensual = {
       mes: nextMonth,
@@ -220,7 +221,7 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
       utilidadPreliminar: nextPrelim,
       sueldos: nextMonthSueldos,
       utilidadNeta: nextNeta,
-      fondoTotal: nextNeta + fondoTotal,
+      fondoTotal: fondoTotal + nextMonthIngresos - nextMonthEgresos - nextMonthSueldos,
       cerrado: existingNext?.cerrado ?? false,
       fechaCierre: existingNext?.fechaCierre || '',
     };
@@ -419,23 +420,14 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
             </span>
           </div>
           <div className="px-6 py-3.5 flex items-center justify-between bg-[#FAF8F5]">
-            <span className="font-bold text-[#1F1A17]">
-              = Utilidad preliminar (Ingresos − Egresos)
-            </span>
-            <span className="font-bold text-[#1F1A17] tabular-nums">
-              {formatCurrency(utilidadPreliminar)}
-            </span>
-          </div>
-          <div className="px-6 py-3.5 flex items-center justify-between">
-            <span className="text-[#49403A]">3. Menos: Sueldos del mes</span>
-            <span className="font-bold text-[#B91C1C] tabular-nums">
-              -{formatCurrency(sueldosMes)}
-            </span>
-          </div>
-          <div className="px-6 py-3.5 flex items-center justify-between bg-[#FAF8F5]">
-            <span className="font-bold text-[#1F1A17]">
-              = Utilidad neta (Utilidad preliminar − Sueldos)
-            </span>
+            <div>
+              <span className="font-bold text-[#1F1A17]">
+                = Utilidad neta del mes (Ingresos − Egresos)
+              </span>
+              <p className="text-xs text-[#8C7E73] mt-0.5">
+                Solo se restan egresos operativos; los sueldos se muestran por separado.
+              </p>
+            </div>
             <span
               className={`text-base font-bold tabular-nums ${
                 utilidadNeta >= 0 ? 'text-emerald-700' : 'text-[#B91C1C]'
@@ -446,7 +438,7 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
           </div>
           <div className="px-6 py-3.5 flex items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[#49403A]">4. Más: Fondo base del mes</span>
+              <span className="text-[#49403A]">3. Más: Fondo base del mes</span>
               <button
                 type="button"
                 onClick={openFondoBaseEditor}
@@ -462,7 +454,7 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
           <div className="px-6 py-4 flex items-center justify-between bg-[var(--theme-primary)] text-white">
             <div>
               <span className="text-base font-bold">
-                = Nuevo Fondo Total (Utilidad neta + Fondo base)
+                = Nuevo Fondo Total (Fondo base + Ingresos − Egresos − Sueldos)
               </span>
               <p className="text-xs text-white/75 mt-0.5">
                 Al cerrar el mes, este monto pasará como Fondo Base de {formatMonthLabel(nextMonth)}.
@@ -470,6 +462,19 @@ export const FinanzasView: React.FC<FinanzasViewProps> = ({
             </div>
             <span className="text-2xl font-bold tabular-nums">
               {formatCurrency(fondoTotal)}
+            </span>
+          </div>
+          <div className="px-6 py-3.5 flex items-center justify-between gap-3 bg-[#FAF8F5]">
+            <div>
+              <span className="font-semibold text-[#1F1A17]">
+                Sueldos del mes (registro separado)
+              </span>
+              <p className="text-xs text-[#8C7E73] mt-0.5">
+                Salen de la misma utilidad: no restan en la Utilidad neta, pero sí se descuentan del Fondo Total.
+              </p>
+            </div>
+            <span className="font-bold text-[var(--theme-accent)] tabular-nums shrink-0">
+              {formatCurrency(sueldosMes)}
             </span>
           </div>
         </div>

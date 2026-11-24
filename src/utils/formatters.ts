@@ -207,3 +207,68 @@ export function extractSpreadsheetId(input: string): string {
   if (urlMatch && urlMatch[1]) return urlMatch[1];
   return trimmed;
 }
+
+export function parseISODateLocal(dateISO: string): Date | null {
+  if (!dateISO) return null;
+  const match = dateISO.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  const y = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  const d = parseInt(match[3], 10);
+  if (!y || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return new Date(y, m - 1, d);
+}
+
+export interface ClientInactivityInfo {
+  lastPurchaseDate: string | null;
+  daysSinceLastPurchase: number | null;
+  isInactiveOver15Days: boolean;
+}
+
+export function getClientInactivityInfo(
+  cliente: { id: string; nombre: string },
+  tickets: { clienteId?: string; clienteNombre: string; fecha: string }[],
+  todayISO: string = getTodayISO()
+): ClientInactivityInfo {
+  const normName = normalizeText(cliente.nombre);
+  let latestDate: string | null = null;
+
+  for (const t of tickets) {
+    const matchesClient =
+      (cliente.id && t.clienteId === cliente.id) ||
+      (normName && normalizeText(t.clienteNombre) === normName);
+    if (!matchesClient || !t.fecha) continue;
+    if (!latestDate || t.fecha > latestDate) {
+      latestDate = t.fecha;
+    }
+  }
+
+  if (!latestDate) {
+    return {
+      lastPurchaseDate: null,
+      daysSinceLastPurchase: null,
+      isInactiveOver15Days: false,
+    };
+  }
+
+  const lastDateObj = parseISODateLocal(latestDate);
+  const todayObj = parseISODateLocal(todayISO);
+  if (!lastDateObj || !todayObj) {
+    return {
+      lastPurchaseDate: latestDate,
+      daysSinceLastPurchase: null,
+      isInactiveOver15Days: false,
+    };
+  }
+
+  const diffDays = Math.floor(
+    (todayObj.getTime() - lastDateObj.getTime()) / (1000 * 60 * 60 * 24)
+  );
+  const days = Math.max(0, diffDays);
+
+  return {
+    lastPurchaseDate: latestDate,
+    daysSinceLastPurchase: days,
+    isInactiveOver15Days: days > 15,
+  };
+}

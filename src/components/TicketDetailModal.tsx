@@ -20,11 +20,13 @@ import {
 } from 'lucide-react';
 import {
   BusinessDataset,
+  DescuentoTipo,
   MetodoPago,
   Producto,
   Ticket,
   TicketAbono,
   TicketItem,
+  TicketItemTipo,
   TipoVenta,
 } from '../types/business';
 import {
@@ -36,9 +38,18 @@ import {
 } from '../utils/formatters';
 import { getTicketPaymentSummary, roundMoney } from '../utils/paymentHelpers';
 import {
+  buildTicketDetalleTexto,
+  computeTicketItemPricing,
+  computeTicketTotals,
+  getTicketItemTipo,
+  getTicketSummary,
+  normalizeTicketItem,
+} from '../utils/ticketAdjustments';
+import {
   buildWhatsAppTicketUrl,
   BUSINESS_BRANDING,
   downloadTicketReceiptPng,
+  resolveLogoDataUrl,
   shareTicketReceiptPng,
 } from '../utils/ticketShare';
 import { DEFAULT_LOGO_PATH } from '../utils/themeManager';
@@ -81,6 +92,12 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
   const [jornadaId, setJornadaId] = useState('');
   const [items, setItems] = useState<TicketItem[]>([]);
   const [selectedAddProductId, setSelectedAddProductId] = useState('');
+  const [addItemTipo, setAddItemTipo] = useState<TicketItemTipo>('Venta');
+
+  // Edit mode discount fields
+  const [descuentoTipo, setDescuentoTipo] = useState<DescuentoTipo>('monto');
+  const [descuentoValor, setDescuentoValor] = useState<string>('');
+  const [descuentoMotivo, setDescuentoMotivo] = useState<string>('');
 
   // Edit mode payment fields
   const [editMetodoPago, setEditMetodoPago] = useState<MetodoPago>('Efectivo');
@@ -96,6 +113,21 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
   // Receipt sharing feedback
   const [shareFeedback, setShareFeedback] = useState('');
   const [isGeneratingPng, setIsGeneratingPng] = useState(false);
+  const [resolvedLogoSrc, setResolvedLogoSrc] = useState<string>(
+    logoUrl || DEFAULT_LOGO_PATH
+  );
+
+  useEffect(() => {
+    let active = true;
+    resolveLogoDataUrl(logoUrl).then((dataUrl) => {
+      if (active && dataUrl) {
+        setResolvedLogoSrc(dataUrl);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [logoUrl]);
 
   useEffect(() => {
     if (!ticket) return;
@@ -109,6 +141,16 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     setJornadaId(ticket.jornadaId || '');
     setItems(ticket.items.map((it) => ({ ...it })));
     setSelectedAddProductId('');
+    setAddItemTipo('Venta');
+    setDescuentoTipo(ticket.descuentoTipo || 'monto');
+    setDescuentoValor(
+      ticket.descuentoValor && ticket.descuentoValor > 0
+        ? String(ticket.descuentoValor)
+        : ticket.descuentoMonto && ticket.descuentoMonto > 0
+        ? String(ticket.descuentoMonto)
+        : ''
+    );
+    setDescuentoMotivo(ticket.descuentoMotivo || '');
     setEditMetodoPago(pay.metodoPago);
     setEditMontoPagado(String(pay.montoPagado));
     setShowAbonoForm(false);
@@ -132,18 +174,22 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     [dataset.productos]
   );
 
-  const editTotalPiezas = useMemo(
-    () => items.reduce((sum, it) => sum + it.cantidad, 0),
-    [items]
+  const editTotals = useMemo(
+    () =>
+      computeTicketTotals(items, {
+        descuentoTipo,
+        descuentoValor: parseFloat(descuentoValor) || 0,
+        descuentoMotivo,
+      }),
+    [items, descuentoTipo, descuentoValor, descuentoMotivo]
   );
 
-  const editTotalImporte = useMemo(
-    () => items.reduce((sum, it) => sum + it.subtotal, 0),
-    [items]
-  );
+  const editTotalPiezas = editTotals.totalPiezas;
+  const editTotalImporte = editTotals.totalImporte;
 
   if (!ticket) return null;
 
+  const ticketSummary = getTicketSummary(ticket);
   const payment = getTicketPaymentSummary(ticket);
   const clienteObj = dataset.clientes.find(
     (c) =>
@@ -152,9 +198,13 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
   );
   const whatsAppUrl = buildWhatsAppTicketUrl(ticket, clienteObj?.telefono);
 
-  const handleThermalPrint = () => {
+  const triggerPrintWithMode = async (mode: 'thermal' | 'standard') => {
+    const ensured = await resolveLogoDataUrl(logoUrl);
+    if (ensured && ensured !== resolvedLogoSrc) {
+      setResolvedLogoSrc(ensured);
+    }
     const html = document.documentElement;
-    html.setAttribute('data-print-mode', 'thermal');
+    html.setAttribute('data-print-mode', mode);
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
@@ -164,8 +214,16 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     window.addEventListener('afterprint', cleanup, { once: true });
     setTimeout(() => {
       window.print();
-    }, 60);
-    setTimeout(cleanup, 2500);
+    }, 100);
+    setTimeout(cleanup, 3500);
+  };
+
+  const handleThermalPrint = () => {
+    void triggerPrintWithMode('thermal');
+  };
+
+  const handleStandardPrint = () => {
+    void triggerPrintWithMode('standard');
   };
 
   const handleDownloadPng = async () => {
@@ -241,10 +299,17 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
       prev.map((it, i) => {
         if (i !== index) return it;
         const cantidad = Math.max(1, nextQty);
+        const tipo = getTicketItemTipo(it);
+        const { precioUnitario, subtotal } = computeTicketItemPricing(
+          cantidad,
+          it.precioUnitario,
+          tipo
+        );
         return {
           ...it,
           cantidad,
-          subtotal: cantidad * it.precioUnitario,
+          precioUnitario,
+          subtotal,
         };
       })
     );
@@ -252,16 +317,67 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
 
   const updateItemPrice = (index: number, rawVal: string) => {
     const parsed = parseFloat(rawVal);
-    const precioUnitario = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+    const rawUnit = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
     setItems((prev) =>
       prev.map((it, i) => {
         if (i !== index) return it;
+        const tipo = getTicketItemTipo(it);
+        const { precioUnitario, subtotal } = computeTicketItemPricing(
+          it.cantidad,
+          rawUnit,
+          tipo
+        );
         return {
           ...it,
           precioUnitario,
-          subtotal: it.cantidad * precioUnitario,
+          subtotal,
         };
       })
+    );
+  };
+
+  const updateItemTipo = (index: number, nextTipo: TicketItemTipo) => {
+    setItems((prev) =>
+      prev.map((it, i) => {
+        if (i !== index) return it;
+        let baseUnit = it.precioUnitario;
+        if ((nextTipo === 'Venta' || nextTipo === 'Devolución') && baseUnit <= 0) {
+          const prod = dataset.productos.find(
+            (p) =>
+              (it.productoId && p.id === it.productoId) ||
+              normalizeText(p.nombre) === normalizeText(it.productoNombre)
+          );
+          if (prod) {
+            baseUnit = tipoVenta === 'Mayoreo' ? prod.precioMayoreo : prod.precioMenudeo;
+          }
+        }
+        const { precioUnitario, subtotal } = computeTicketItemPricing(
+          it.cantidad,
+          baseUnit,
+          nextTipo
+        );
+        return normalizeTicketItem({
+          ...it,
+          tipoItem: nextTipo,
+          precioUnitario,
+          subtotal,
+          regresarInventario:
+            nextTipo === 'Devolución'
+              ? it.regresarInventario ?? true
+              : nextTipo === 'Cambio'
+              ? it.regresarInventario ?? false
+              : undefined,
+        });
+      })
+    );
+  };
+
+  const updateItemMeta = (
+    index: number,
+    patch: { regresarInventario?: boolean; motivo?: string }
+  ) => {
+    setItems((prev) =>
+      prev.map((it, i) => (i === index ? { ...it, ...patch } : it))
     );
   };
 
@@ -276,34 +392,52 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     );
     if (!prod) return;
 
-    const unitPrice = tipoVenta === 'Mayoreo' ? prod.precioMayoreo : prod.precioMenudeo;
+    const catalogPrice = tipoVenta === 'Mayoreo' ? prod.precioMayoreo : prod.precioMenudeo;
+    const { precioUnitario, subtotal } = computeTicketItemPricing(
+      1,
+      catalogPrice,
+      addItemTipo
+    );
 
     setItems((prev) => {
       const existingIdx = prev.findIndex(
         (it) =>
-          (it.productoId && it.productoId === prod.id) ||
-          normalizeText(it.productoNombre) === normalizeText(prod.nombre)
+          getTicketItemTipo(it) === addItemTipo &&
+          ((it.productoId && it.productoId === prod.id) ||
+            normalizeText(it.productoNombre) === normalizeText(prod.nombre))
       );
       if (existingIdx >= 0) {
         return prev.map((it, i) => {
           if (i !== existingIdx) return it;
           const cantidad = it.cantidad + 1;
+          const pricing = computeTicketItemPricing(
+            cantidad,
+            it.precioUnitario,
+            addItemTipo
+          );
           return {
             ...it,
             cantidad,
-            subtotal: cantidad * it.precioUnitario,
+            precioUnitario: pricing.precioUnitario,
+            subtotal: pricing.subtotal,
           };
         });
       }
       return [
         ...prev,
-        {
+        normalizeTicketItem({
           productoId: prod.id,
           productoNombre: prod.nombre,
           cantidad: 1,
-          precioUnitario: unitPrice,
-          subtotal: unitPrice,
-        },
+          precioUnitario,
+          subtotal,
+          tipoItem: addItemTipo,
+          ...(addItemTipo === 'Devolución'
+            ? { regresarInventario: true }
+            : addItemTipo === 'Cambio'
+            ? { regresarInventario: false }
+            : {}),
+        }),
       ];
     });
     setSelectedAddProductId('');
@@ -322,6 +456,8 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     setTipoVenta(nextTipo);
     setItems((prev) =>
       prev.map((it) => {
+        const tipo = getTicketItemTipo(it);
+        if (tipo === 'Cortesía' || tipo === 'Cambio') return it;
         const prod = dataset.productos.find(
           (p) =>
             (it.productoId && p.id === it.productoId) ||
@@ -329,10 +465,11 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
         );
         if (!prod) return it;
         const nextPrice = nextTipo === 'Mayoreo' ? prod.precioMayoreo : prod.precioMenudeo;
+        const pricing = computeTicketItemPricing(it.cantidad, nextPrice, tipo);
         return {
           ...it,
-          precioUnitario: nextPrice,
-          subtotal: it.cantidad * nextPrice,
+          precioUnitario: pricing.precioUnitario,
+          subtotal: pricing.subtotal,
         };
       })
     );
@@ -342,6 +479,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     e.preventDefault();
     if (items.length === 0) return;
 
+    const cleanItems = items.map(normalizeTicketItem);
     const parsedPagado = Math.min(
       editTotalImporte,
       Math.max(0, roundMoney(parseFloat(editMontoPagado) || 0))
@@ -352,7 +490,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
       metodoPago: editMetodoPago,
       montoPagado: parsedPagado,
       estadoPago:
-        parsedPagado >= editTotalImporte - 0.01
+        editTotalImporte <= 0.01 || parsedPagado >= editTotalImporte - 0.01
           ? 'Pagado'
           : parsedPagado > 0
           ? 'Parcial'
@@ -370,10 +508,24 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
       jornadaId,
       totalPiezas: editTotalPiezas,
       totalImporte: editTotalImporte,
-      items,
-      detalleTexto: items
-        .map((it) => `${it.cantidad}x ${it.productoNombre} ($${it.subtotal.toFixed(2)})`)
-        .join(', '),
+      subtotalBruto: editTotals.subtotalBruto,
+      ...(editTotals.descuentoMonto > 0
+        ? {
+            descuentoTipo: editTotals.descuentoTipo,
+            descuentoValor: editTotals.descuentoValor,
+            descuentoMonto: editTotals.descuentoMonto,
+            ...(editTotals.descuentoMotivo
+              ? { descuentoMotivo: editTotals.descuentoMotivo }
+              : { descuentoMotivo: undefined }),
+          }
+        : {
+            descuentoTipo: undefined,
+            descuentoValor: undefined,
+            descuentoMonto: undefined,
+            descuentoMotivo: undefined,
+          }),
+      items: cleanItems,
+      detalleTexto: buildTicketDetalleTexto(cleanItems, editTotals),
       metodoPago: normalizedPay.metodoPago,
       estadoPago: normalizedPay.estadoPago,
       montoPagado: normalizedPay.montoPagado,
@@ -434,20 +586,32 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
       ? 'bg-amber-50 text-amber-800 border-amber-200'
       : 'bg-red-50 text-red-700 border-red-200';
 
-  const effectiveLogo = logoUrl || DEFAULT_LOGO_PATH;
+  const effectiveLogo = resolvedLogoSrc || logoUrl || DEFAULT_LOGO_PATH;
 
   const thermalPortal = createPortal(
     <div className="thermal-receipt-only" aria-hidden="true">
-      <div style={{ textAlign: 'center', marginBottom: 6 }}>
-        <img
-          src={effectiveLogo}
-          alt=""
-          style={{ height: 38, margin: '0 auto 4px', objectFit: 'contain' }}
-        />
-        <div style={{ fontWeight: 700, fontSize: 13 }}>PRODUCTOS ASTORGA</div>
-        <div style={{ fontSize: 10 }}>{BUSINESS_BRANDING.location}</div>
-        <div style={{ fontSize: 10 }}>IG: {BUSINESS_BRANDING.instagram}</div>
-        <div style={{ fontSize: 10 }}>Cel / WA: {BUSINESS_BRANDING.phone}</div>
+      <div style={{ marginBottom: 6 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            marginBottom: 4,
+          }}
+        >
+          <img
+            src={effectiveLogo}
+            alt="Productos Astorga"
+            style={{ width: 30, height: 30, objectFit: 'contain', flexShrink: 0 }}
+          />
+          <div style={{ fontWeight: 700, fontSize: 12, lineHeight: 1.15, textAlign: 'left' }}>
+            PRODUCTOS ASTORGA
+          </div>
+        </div>
+        <div style={{ textAlign: 'center', fontSize: 10 }}>{BUSINESS_BRANDING.location}</div>
+        <div style={{ textAlign: 'center', fontSize: 10 }}>IG: {BUSINESS_BRANDING.instagram}</div>
+        <div style={{ textAlign: 'center', fontSize: 10 }}>Cel / WA: {BUSINESS_BRANDING.phone}</div>
       </div>
       <div style={{ borderTop: '1px dashed #000', paddingTop: 5, marginBottom: 5 }}>
         <div>
@@ -464,19 +628,59 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
         </div>
       </div>
       <div style={{ borderTop: '1px dashed #000', paddingTop: 5, marginBottom: 5 }}>
-        {ticket.items.map((it, idx) => (
-          <div key={idx} style={{ marginBottom: 4 }}>
-            <div style={{ fontWeight: 600 }}>{it.productoNombre}</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>
-                {it.cantidad} x {formatCurrency(it.precioUnitario)}
-              </span>
-              <strong>{formatCurrency(it.subtotal)}</strong>
+        {ticket.items.map((it, idx) => {
+          const tipo = getTicketItemTipo(it);
+          return (
+            <div key={idx} style={{ marginBottom: 4 }}>
+              <div style={{ fontWeight: 600 }}>
+                {it.productoNombre}
+                {tipo !== 'Venta' ? ` [${tipo}]` : ''}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>
+                  {it.cantidad} x{' '}
+                  {tipo === 'Cortesía' || tipo === 'Cambio'
+                    ? '$0.00'
+                    : formatCurrency(it.precioUnitario)}
+                </span>
+                <strong>
+                  {tipo === 'Devolución'
+                    ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                    : formatCurrency(it.subtotal)}
+                </strong>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div style={{ borderTop: '1px dashed #000', paddingTop: 5, marginBottom: 6 }}>
+        {(ticketSummary.devolucionesMonto > 0 || ticketSummary.descuentoMonto > 0) && (
+          <div style={{ fontSize: 10, marginBottom: 3 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Subtotal:</span>
+              <span>{formatCurrency(ticketSummary.subtotalBruto)}</span>
+            </div>
+            {ticketSummary.devolucionesMonto > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>Devoluciones:</span>
+                <span>-{formatCurrency(ticketSummary.devolucionesMonto)}</span>
+              </div>
+            )}
+            {ticketSummary.descuentoMonto > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>
+                  Desc.
+                  {ticketSummary.descuentoTipo === 'porcentaje' &&
+                  ticketSummary.descuentoValor > 0
+                    ? ` (${ticketSummary.descuentoValor}%)`
+                    : ''}
+                  :
+                </span>
+                <span>-{formatCurrency(ticketSummary.descuentoMonto)}</span>
+              </div>
+            )}
+          </div>
+        )}
         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
           <span>Piezas:</span>
           <strong>{ticket.totalPiezas}</strong>
@@ -512,10 +716,172 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
     document.body
   );
 
+  const standardPortal = createPortal(
+    <div className="standard-receipt-only" aria-hidden="true">
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 16,
+          paddingBottom: 12,
+          borderBottom: '2px solid #4A2511',
+          marginBottom: 14,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <img
+            src={effectiveLogo}
+            alt={BUSINESS_BRANDING.name}
+            style={{ width: 52, height: 52, objectFit: 'contain', flexShrink: 0 }}
+          />
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#1F1A17' }}>
+              PRODUCTOS ASTORGA
+            </div>
+            <div style={{ fontSize: 11, color: '#49403A' }}>{BUSINESS_BRANDING.location}</div>
+            <div style={{ fontSize: 11, color: '#6E6259' }}>
+              IG: {BUSINESS_BRANDING.instagram} · Cel/WA: {BUSINESS_BRANDING.phone}
+            </div>
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'monospace', color: '#4A2511' }}>
+            {ticket.folio}
+          </div>
+          <div style={{ fontSize: 11, color: '#6E6259' }}>{formatDateShort(ticket.fecha)}</div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 12, fontSize: 12 }}>
+        <div>
+          <strong>Cliente:</strong> {ticket.clienteNombre}
+        </div>
+        <div>
+          <strong>Ruta:</strong> {ticket.ruta}
+        </div>
+      </div>
+
+      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14 }}>
+        <thead>
+          <tr style={{ borderBottom: '1px solid #D8D1C7', fontSize: 11, color: '#6E6259' }}>
+            <th style={{ textAlign: 'left', padding: '6px 4px' }}>Producto</th>
+            <th style={{ textAlign: 'center', padding: '6px 4px' }}>Cant.</th>
+            <th style={{ textAlign: 'right', padding: '6px 4px' }}>Precio</th>
+            <th style={{ textAlign: 'right', padding: '6px 4px' }}>Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ticket.items.map((it, idx) => {
+            const tipo = getTicketItemTipo(it);
+            return (
+              <tr key={idx} style={{ borderBottom: '1px solid #EFECE6', fontSize: 12 }}>
+                <td style={{ padding: '6px 4px', fontWeight: 600 }}>
+                  {it.productoNombre}
+                  {tipo !== 'Venta' && (
+                    <span style={{ fontSize: 10, fontWeight: 700, marginLeft: 5 }}>
+                      [{tipo}]
+                    </span>
+                  )}
+                </td>
+                <td style={{ padding: '6px 4px', textAlign: 'center' }}>{it.cantidad}</td>
+                <td style={{ padding: '6px 4px', textAlign: 'right' }}>
+                  {tipo === 'Cortesía' || tipo === 'Cambio'
+                    ? '$0.00'
+                    : formatCurrency(it.precioUnitario)}
+                </td>
+                <td style={{ padding: '6px 4px', textAlign: 'right', fontWeight: 700 }}>
+                  {tipo === 'Devolución'
+                    ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                    : formatCurrency(it.subtotal)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {(ticketSummary.devolucionesMonto > 0 || ticketSummary.descuentoMonto > 0) && (
+        <div style={{ fontSize: 11, marginBottom: 8, color: '#49403A' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span>Subtotal ventas:</span>
+            <span>{formatCurrency(ticketSummary.subtotalBruto)}</span>
+          </div>
+          {ticketSummary.devolucionesMonto > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#B91C1C' }}>
+              <span>Devoluciones:</span>
+              <span>-{formatCurrency(ticketSummary.devolucionesMonto)}</span>
+            </div>
+          )}
+          {ticketSummary.descuentoMonto > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#047857' }}>
+              <span>
+                Descuento
+                {ticketSummary.descuentoTipo === 'porcentaje' &&
+                ticketSummary.descuentoValor > 0
+                  ? ` (${ticketSummary.descuentoValor}%)`
+                  : ''}
+                {ticketSummary.descuentoMotivo ? ` · ${ticketSummary.descuentoMotivo}` : ''}:
+              </span>
+              <span>-{formatCurrency(ticketSummary.descuentoMonto)}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          paddingTop: 10,
+          borderTop: '1.5px solid #4A2511',
+          marginBottom: 10,
+        }}
+      >
+        <span style={{ fontSize: 12 }}>
+          Total piezas: <strong>{ticket.totalPiezas}</strong>
+        </span>
+        <span style={{ fontSize: 18, fontWeight: 700, color: '#4A2511' }}>
+          TOTAL: {formatCurrency(ticket.totalImporte)}
+        </span>
+      </div>
+
+      <div
+        style={{
+          background: '#FAF6F0',
+          border: '1px solid #E7E3DC',
+          borderRadius: 8,
+          padding: '8px 12px',
+          fontSize: 11,
+          marginBottom: 14,
+        }}
+      >
+        <div>
+          <strong>Estado de pago:</strong> {payment.estadoPago} ({payment.metodoPago})
+        </div>
+        {payment.saldoPendiente > 0 && (
+          <div style={{ marginTop: 3 }}>
+            Abonado: {formatCurrency(payment.montoPagado)} ·{' '}
+            <strong style={{ color: '#B91C1C' }}>
+              Saldo pendiente: {formatCurrency(payment.saldoPendiente)}
+            </strong>
+          </div>
+        )}
+      </div>
+
+      <div style={{ textAlign: 'center', fontSize: 11, color: '#6E6259' }}>
+        ¡Gracias por su compra en Productos Astorga!
+      </div>
+    </div>,
+    document.body
+  );
+
   return (
     <>
       {thermalPortal}
-      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/55 backdrop-blur-xs p-0 sm:p-4">
+      {standardPortal}
+      <div className="no-print fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/55 backdrop-blur-xs p-0 sm:p-4">
         <div className="w-full max-w-2xl max-h-[92vh] flex flex-col rounded-t-3xl sm:rounded-2xl bg-white border border-[#E7E3DC] shadow-2xl overflow-hidden">
           {/* Header */}
           <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-[#EFECE6]">
@@ -560,12 +926,11 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
               <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-5">
                 {/* Receipt Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl bg-[#FAF8F5] border border-[#EFECE6] p-4">
-                  <div className="flex items-center gap-3.5">
+                  <div className="flex flex-row items-center gap-3.5">
                     <img
                       src={effectiveLogo}
                       alt={BUSINESS_BRANDING.name}
-                      referrerPolicy="no-referrer"
-                      className="h-14 w-16 object-contain shrink-0"
+                      className="h-14 w-14 object-contain shrink-0"
                     />
                     <div>
                       <p className="text-sm font-bold text-[#1F1A17]">{BUSINESS_BRANDING.name}</p>
@@ -607,22 +972,57 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#EFECE6] text-sm">
-                        {ticket.items.map((it, idx) => (
-                          <tr key={`${it.productoId}-${idx}`}>
-                            <td className="py-2.5 px-3.5 font-medium text-[#1F1A17]">
-                              {it.productoNombre}
-                            </td>
-                            <td className="py-2.5 px-3 text-center tabular-nums text-[#49403A]">
-                              {it.cantidad}
-                            </td>
-                            <td className="py-2.5 px-3 text-right tabular-nums text-[#6E6259]">
-                              {formatCurrency(it.precioUnitario)}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-right font-semibold tabular-nums text-[#1F1A17]">
-                              {formatCurrency(it.subtotal)}
-                            </td>
-                          </tr>
-                        ))}
+                        {ticket.items.map((it, idx) => {
+                          const tipo = getTicketItemTipo(it);
+                          return (
+                            <tr key={`${it.productoId}-${idx}`}>
+                              <td className="py-2.5 px-3.5 font-medium text-[#1F1A17]">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span>{it.productoNombre}</span>
+                                  {tipo !== 'Venta' && (
+                                    <span
+                                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                        tipo === 'Devolución'
+                                          ? 'bg-red-50 text-red-700 border border-red-200'
+                                          : tipo === 'Cortesía'
+                                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                          : 'bg-sky-50 text-sky-700 border border-sky-200'
+                                      }`}
+                                    >
+                                      {tipo}
+                                    </span>
+                                  )}
+                                </div>
+                                {it.motivo && (
+                                  <p className="text-[11px] text-[#6E6259] font-normal mt-0.5">
+                                    {it.motivo}
+                                  </p>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-center tabular-nums text-[#49403A]">
+                                {it.cantidad}
+                              </td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-[#6E6259]">
+                                {tipo === 'Cortesía' || tipo === 'Cambio'
+                                  ? '$0.00'
+                                  : formatCurrency(it.precioUnitario)}
+                              </td>
+                              <td
+                                className={`py-2.5 px-3.5 text-right font-semibold tabular-nums ${
+                                  tipo === 'Devolución'
+                                    ? 'text-red-700'
+                                    : tipo === 'Cortesía' || tipo === 'Cambio'
+                                    ? 'text-emerald-700'
+                                    : 'text-[#1F1A17]'
+                                }`}
+                              >
+                                {tipo === 'Devolución'
+                                  ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                                  : formatCurrency(it.subtotal)}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   ) : (
@@ -631,9 +1031,52 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                     </div>
                   )}
 
+                  {(ticketSummary.devolucionesMonto > 0 ||
+                    ticketSummary.descuentoMonto > 0) && (
+                    <div className="px-4 py-2.5 bg-white border-t border-[#EFECE6] space-y-1 text-xs">
+                      <div className="flex items-center justify-between text-[#6E6259]">
+                        <span>Subtotal ventas</span>
+                        <span className="font-semibold text-[#1F1A17] tabular-nums">
+                          {formatCurrency(ticketSummary.subtotalBruto)}
+                        </span>
+                      </div>
+                      {ticketSummary.devolucionesMonto > 0 && (
+                        <div className="flex items-center justify-between text-red-700">
+                          <span>Devoluciones ({ticketSummary.piezasDevolucion} pzas)</span>
+                          <span className="font-semibold tabular-nums">
+                            -{formatCurrency(ticketSummary.devolucionesMonto)}
+                          </span>
+                        </div>
+                      )}
+                      {ticketSummary.descuentoMonto > 0 && (
+                        <div className="flex items-center justify-between text-emerald-700">
+                          <span>
+                            Descuento
+                            {ticketSummary.descuentoTipo === 'porcentaje' &&
+                            ticketSummary.descuentoValor > 0
+                              ? ` (${ticketSummary.descuentoValor}%)`
+                              : ''}
+                            {ticketSummary.descuentoMotivo
+                              ? ` · ${ticketSummary.descuentoMotivo}`
+                              : ''}
+                          </span>
+                          <span className="font-semibold tabular-nums">
+                            -{formatCurrency(ticketSummary.descuentoMonto)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="px-4 py-3.5 bg-[#FAF8F5] border-t border-[#EFECE6] flex items-center justify-between gap-4">
                     <span className="text-xs font-semibold text-[#6E6259] tabular-nums">
                       Total: {formatNumber(ticket.totalPiezas)} piezas
+                      {ticketSummary.piezasCortesia > 0
+                        ? ` · ${ticketSummary.piezasCortesia} cortesía`
+                        : ''}
+                      {ticketSummary.piezasCambio > 0
+                        ? ` · ${ticketSummary.piezasCambio} cambio`
+                        : ''}
                     </span>
                     <div className="text-right">
                       <span className="text-xs text-[#6E6259] mr-2">Importe total</span>
@@ -832,7 +1275,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => window.print()}
+                      onClick={handleStandardPrint}
                       className="min-h-[40px] inline-flex items-center gap-1.5 rounded-xl border border-[#D8D1C7] bg-white px-3.5 py-2 text-xs font-semibold text-[#49403A] hover:bg-[#FAF6F0]"
                     >
                       <Printer className="w-4 h-4" />
@@ -1019,10 +1462,36 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                 </div>
 
                 {/* Add product to ticket */}
-                <div className="rounded-2xl bg-[#FAF8F5] border border-[#E7E3DC] p-3.5 space-y-2">
-                  <label className="block text-xs font-semibold text-[#6E6259]">
-                    Agregar producto al ticket
-                  </label>
+                <div className="rounded-2xl bg-[#FAF8F5] border border-[#E7E3DC] p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="block text-xs font-semibold text-[#6E6259]">
+                      Agregar producto o movimiento al ticket
+                    </label>
+                    <div className="grid grid-cols-4 gap-1 p-0.5 rounded-lg bg-[#EFECE6]">
+                      {(['Venta', 'Cortesía', 'Devolución', 'Cambio'] as TicketItemTipo[]).map(
+                        (tipo) => (
+                          <button
+                            key={tipo}
+                            type="button"
+                            onClick={() => setAddItemTipo(tipo)}
+                            className={`px-2 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                              addItemTipo === tipo
+                                ? tipo === 'Devolución'
+                                  ? 'bg-red-700 text-white'
+                                  : tipo === 'Cortesía'
+                                  ? 'bg-emerald-700 text-white'
+                                  : tipo === 'Cambio'
+                                  ? 'bg-sky-700 text-white'
+                                  : 'bg-[var(--theme-primary)] text-white'
+                                : 'text-[#6E6259]'
+                            }`}
+                          >
+                            {tipo}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
                   <div className="flex gap-2">
                     <select
                       value={selectedAddProductId}
@@ -1072,74 +1541,222 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                     </div>
                   ) : (
                     <div className="divide-y divide-[#EFECE6] border border-[#E7E3DC] rounded-xl overflow-hidden">
-                      {items.map((it, idx) => (
-                        <div
-                          key={`${it.productoId}-${idx}`}
-                          className="p-3.5 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-bold text-[#1F1A17] truncate">
-                              {it.productoNombre}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1 text-xs text-[#6E6259] tabular-nums">
-                              <span>Precio $:</span>
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                inputMode="decimal"
-                                value={it.precioUnitario}
-                                onChange={(e) => updateItemPrice(idx, e.target.value)}
-                                aria-label={`Precio unitario de ${it.productoNombre}`}
-                                className="w-24 h-8 rounded-lg border border-[#D8D1C7] px-2 text-xs font-mono font-bold text-[var(--theme-primary)] focus:outline-none focus:border-[var(--theme-primary)]"
-                              />
-                              <span>=</span>
-                              <strong className="text-[#1F1A17]">
-                                {formatCurrency(it.subtotal)}
-                              </strong>
-                            </div>
-                          </div>
+                      {items.map((it, idx) => {
+                        const tipo = getTicketItemTipo(it);
+                        return (
+                          <div
+                            key={`${it.productoId}-${idx}`}
+                            className="p-3.5 bg-white space-y-2.5"
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="min-w-0 flex-1 space-y-1.5">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="text-sm font-bold text-[#1F1A17] truncate">
+                                    {it.productoNombre}
+                                  </p>
+                                  <select
+                                    value={tipo}
+                                    onChange={(e) =>
+                                      updateItemTipo(idx, e.target.value as TicketItemTipo)
+                                    }
+                                    aria-label={`Tipo de movimiento para ${it.productoNombre}`}
+                                    className={`h-7 rounded-lg border px-2 text-[11px] font-bold ${
+                                      tipo === 'Devolución'
+                                        ? 'border-red-200 bg-red-50 text-red-700'
+                                        : tipo === 'Cortesía'
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                        : tipo === 'Cambio'
+                                        ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                        : 'border-[#D8D1C7] bg-[#FAF8F5] text-[#49403A]'
+                                    }`}
+                                  >
+                                    <option value="Venta">Venta</option>
+                                    <option value="Cortesía">Cortesía ($0)</option>
+                                    <option value="Devolución">Devolución (−$)</option>
+                                    <option value="Cambio">Cambio ($0)</option>
+                                  </select>
+                                </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                            <button
-                              type="button"
-                              onClick={() => updateItemQty(idx, it.cantidad - 1)}
-                              disabled={it.cantidad <= 1}
-                              aria-label={`Restar ${it.productoNombre}`}
-                              className="h-9 w-9 flex items-center justify-center rounded-lg border border-[#D8D1C7] text-[var(--theme-primary)] disabled:opacity-35"
-                            >
-                              <Minus className="w-3.5 h-3.5" />
-                            </button>
-                            <input
-                              type="number"
-                              min={1}
-                              inputMode="numeric"
-                              value={it.cantidad}
-                              onChange={(e) =>
-                                updateItemQty(idx, parseInt(e.target.value, 10) || 1)
-                              }
-                              aria-label={`Cantidad de ${it.productoNombre}`}
-                              className="w-14 h-9 rounded-lg border border-[#D8D1C7] text-center text-xs font-bold text-[#1F1A17] tabular-nums"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => updateItemQty(idx, it.cantidad + 1)}
-                              aria-label={`Sumar ${it.productoNombre}`}
-                              className="h-9 w-9 flex items-center justify-center rounded-lg bg-[var(--theme-primary)] text-white"
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeItem(idx)}
-                              aria-label={`Quitar ${it.productoNombre}`}
-                              className="h-9 w-9 flex items-center justify-center rounded-lg text-[#8C7E73] hover:text-red-700 hover:bg-red-50 ml-1"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                                <div className="flex items-center gap-2 text-xs text-[#6E6259] tabular-nums">
+                                  <span>
+                                    {tipo === 'Devolución' ? 'Bonificación $:' : 'Precio $:'}
+                                  </span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    inputMode="decimal"
+                                    disabled={tipo === 'Cortesía' || tipo === 'Cambio'}
+                                    value={
+                                      tipo === 'Cortesía' || tipo === 'Cambio'
+                                        ? 0
+                                        : it.precioUnitario
+                                    }
+                                    onChange={(e) => updateItemPrice(idx, e.target.value)}
+                                    aria-label={`Precio unitario de ${it.productoNombre}`}
+                                    className="w-24 h-8 rounded-lg border border-[#D8D1C7] px-2 text-xs font-mono font-bold text-[var(--theme-primary)] disabled:bg-[#FAF8F5] disabled:text-[#8C7E73] focus:outline-none focus:border-[var(--theme-primary)]"
+                                  />
+                                  <span>=</span>
+                                  <strong
+                                    className={
+                                      tipo === 'Devolución'
+                                        ? 'text-red-700'
+                                        : tipo === 'Cortesía' || tipo === 'Cambio'
+                                        ? 'text-emerald-700'
+                                        : 'text-[#1F1A17]'
+                                    }
+                                  >
+                                    {tipo === 'Devolución'
+                                      ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                                      : formatCurrency(it.subtotal)}
+                                  </strong>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                                <button
+                                  type="button"
+                                  onClick={() => updateItemQty(idx, it.cantidad - 1)}
+                                  disabled={it.cantidad <= 1}
+                                  aria-label={`Restar ${it.productoNombre}`}
+                                  className="h-9 w-9 flex items-center justify-center rounded-lg border border-[#D8D1C7] text-[var(--theme-primary)] disabled:opacity-35"
+                                >
+                                  <Minus className="w-3.5 h-3.5" />
+                                </button>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  inputMode="numeric"
+                                  value={it.cantidad}
+                                  onChange={(e) =>
+                                    updateItemQty(idx, parseInt(e.target.value, 10) || 1)
+                                  }
+                                  aria-label={`Cantidad de ${it.productoNombre}`}
+                                  className="w-14 h-9 rounded-lg border border-[#D8D1C7] text-center text-xs font-bold text-[#1F1A17] tabular-nums"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => updateItemQty(idx, it.cantidad + 1)}
+                                  aria-label={`Sumar ${it.productoNombre}`}
+                                  className="h-9 w-9 flex items-center justify-center rounded-lg bg-[var(--theme-primary)] text-white"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeItem(idx)}
+                                  aria-label={`Quitar ${it.productoNombre}`}
+                                  className="h-9 w-9 flex items-center justify-center rounded-lg text-[#8C7E73] hover:text-red-700 hover:bg-red-50 ml-1"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {tipo !== 'Venta' && (
+                              <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1.5 border-t border-[#F4F1EB]">
+                                {(tipo === 'Devolución' || tipo === 'Cambio') && (
+                                  <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[#49403A] cursor-pointer shrink-0">
+                                    <input
+                                      type="checkbox"
+                                      checked={
+                                        it.regresarInventario !== undefined
+                                          ? it.regresarInventario
+                                          : tipo === 'Devolución'
+                                      }
+                                      onChange={(e) =>
+                                        updateItemMeta(idx, {
+                                          regresarInventario: e.target.checked,
+                                        })
+                                      }
+                                      className="h-3.5 w-3.5 accent-[var(--theme-primary)]"
+                                    />
+                                    <span>
+                                      {tipo === 'Devolución'
+                                        ? 'Reingresar a stock'
+                                        : 'Pieza recibida apta'}
+                                    </span>
+                                  </label>
+                                )}
+                                <input
+                                  type="text"
+                                  value={it.motivo || ''}
+                                  onChange={(e) =>
+                                    updateItemMeta(idx, { motivo: e.target.value })
+                                  }
+                                  placeholder={`Nota / motivo de ${tipo.toLowerCase()} (opcional)`}
+                                  className="flex-1 h-8 rounded-lg border border-[#E7E3DC] bg-[#FAF8F5] px-2.5 text-xs text-[#1F1A17]"
+                                />
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Edit discount */}
+                <div className="rounded-2xl bg-[#FAF8F5] border border-[#E7E3DC] p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-[#1F1A17]">
+                      Descuento del ticket
+                    </span>
+                    {editTotals.descuentoMonto > 0 && (
+                      <span className="text-xs font-bold text-emerald-700 tabular-nums">
+                        -{formatCurrency(editTotals.descuentoMonto)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 p-0.5 rounded-xl bg-[#EFECE6] h-10">
+                      <button
+                        type="button"
+                        onClick={() => setDescuentoTipo('monto')}
+                        className={`rounded-lg text-xs font-bold ${
+                          descuentoTipo === 'monto'
+                            ? 'bg-[var(--theme-primary)] text-white'
+                            : 'text-[#6E6259]'
+                        }`}
+                      >
+                        Monto ($)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDescuentoTipo('porcentaje')}
+                        className={`rounded-lg text-xs font-bold ${
+                          descuentoTipo === 'porcentaje'
+                            ? 'bg-[var(--theme-primary)] text-white'
+                            : 'text-[#6E6259]'
+                        }`}
+                      >
+                        Porcentaje (%)
+                      </button>
+                    </div>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max={descuentoTipo === 'porcentaje' ? 100 : undefined}
+                      value={descuentoValor}
+                      onChange={(e) => setDescuentoValor(e.target.value)}
+                      placeholder={descuentoTipo === 'porcentaje' ? '0%' : '$0.00'}
+                      className="h-10 rounded-xl border border-[#D8D1C7] bg-white px-3 text-sm font-mono font-bold text-[#1F1A17]"
+                    />
+                    <input
+                      type="text"
+                      value={descuentoMotivo}
+                      onChange={(e) => setDescuentoMotivo(e.target.value)}
+                      placeholder="Motivo (opcional)"
+                      className="h-10 rounded-xl border border-[#D8D1C7] bg-white px-3 text-xs text-[#1F1A17]"
+                    />
+                  </div>
+                  {(editTotals.devolucionesMonto > 0 || editTotals.descuentoMonto > 0) && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs text-[#6E6259] border-t border-[#E7E3DC]">
+                      <span>Subtotal ventas: {formatCurrency(editTotals.subtotalBruto)}</span>
+                      <span className="font-bold text-[var(--theme-primary)]">
+                        Neto final: {formatCurrency(editTotalImporte)}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -1159,6 +1776,15 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                     setTipoVenta(ticket.tipoVenta);
                     setJornadaId(ticket.jornadaId || '');
                     setItems(ticket.items.map((it) => ({ ...it })));
+                    setDescuentoTipo(ticket.descuentoTipo || 'monto');
+                    setDescuentoValor(
+                      ticket.descuentoValor && ticket.descuentoValor > 0
+                        ? String(ticket.descuentoValor)
+                        : ticket.descuentoMonto && ticket.descuentoMonto > 0
+                        ? String(ticket.descuentoMonto)
+                        : ''
+                    );
+                    setDescuentoMotivo(ticket.descuentoMotivo || '');
                     setEditMetodoPago(pay.metodoPago);
                     setEditMontoPagado(String(pay.montoPagado));
                   }}

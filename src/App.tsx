@@ -142,6 +142,11 @@ import {
 } from './utils/offlineQueue';
 import { generateNextFolio, getTodayISO, normalizeText } from './utils/formatters';
 import { recalculateJornadaFromTickets } from './utils/incomeConsolidation';
+import {
+  buildTicketDetalleTexto,
+  computeTicketGeneralInventoryEffects,
+  computeTicketTotals,
+} from './utils/ticketAdjustments';
 import { InicioView } from './modules/InicioView';
 import { NuevoPedidoView } from './modules/NuevoPedidoView';
 import { JornadasView } from './modules/JornadasView';
@@ -227,6 +232,7 @@ export default function App() {
 
   const [activeModule, setActiveModule] = useState<AppModule>('inicio');
   const [preselectedJornadaId, setPreselectedJornadaId] = useState<string>('');
+  const [clientesInitialInactiveFilter, setClientesInitialInactiveFilter] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Google Sheets configuration
@@ -956,30 +962,30 @@ export default function App() {
             jornadaId: mappedJornadaId,
           });
           if (action.deductGeneralInventory && !mappedJornadaId && mutableMapping.productos) {
-            const deltas = action.draft.items.map((it) => ({
-              productoId: it.productoId,
-              productoNombre: it.productoNombre,
-              delta: -it.cantidad,
-            }));
-            await adjustProductosInventarioByDelta(
-              token,
-              spreadsheetId,
-              mutableMapping.productos,
-              deltas
+            const { stockDeltas, kardexGroups } = computeTicketGeneralInventoryEffects(
+              action.draft.items
             );
-            const movTab = await ensureTabDuringSync('movimientosInventario');
-            await appendMovimientosInventarioBatch(
-              token,
-              spreadsheetId,
-              movTab,
-              buildMovimientosFromDeltas(
-                deltas,
-                'Venta directa',
-                createdTicket.folio,
-                `Cliente: ${action.draft.clienteNombre}`,
-                action.draft.fecha
-              )
+            let postProducts = dataset.productos;
+            if (stockDeltas.length > 0) {
+              postProducts = applyLocalInventoryDeltas(dataset.productos, stockDeltas);
+              await adjustProductosInventarioByDelta(
+                token,
+                spreadsheetId,
+                mutableMapping.productos,
+                stockDeltas
+              );
+            }
+            const movs = buildTicketKardexMovimientos(
+              kardexGroups,
+              createdTicket.folio,
+              action.draft.clienteNombre,
+              action.draft.fecha,
+              postProducts
             );
+            if (movs.length > 0) {
+              const movTab = await ensureTabDuringSync('movimientosInventario');
+              await appendMovimientosInventarioBatch(token, spreadsheetId, movTab, movs);
+            }
           }
         } else if (action.type === 'update_ticket') {
           if (action.ticket.rowNumber && action.ticket.rowNumber >= 2) {
@@ -1427,6 +1433,42 @@ export default function App() {
       });
   };
 
+  const buildTicketKardexMovimientos = (
+    kardexGroups: ReturnType<typeof computeTicketGeneralInventoryEffects>['kardexGroups'],
+    referencia: string,
+    clienteNombre: string,
+    fecha = getTodayISO(),
+    postProducts?: Producto[]
+  ): Omit<MovimientoInventario, 'id'>[] => {
+    const productList = postProducts || dataset.productos;
+    const out: Omit<MovimientoInventario, 'id'>[] = [];
+    for (const group of kardexGroups) {
+      for (const d of group.deltas) {
+        if (d.delta === 0 && group.tipo !== 'Merma' && group.tipo !== 'Cambio cliente') {
+          continue;
+        }
+        const matched = productList.find(
+          (p) =>
+            (d.productoId && p.id === d.productoId) ||
+            normalizeText(p.nombre) === normalizeText(d.productoNombre)
+        );
+        out.push({
+          fecha,
+          tipo: group.tipo,
+          productoId: d.productoId || matched?.id || '',
+          productoNombre: d.productoNombre || matched?.nombre || '',
+          cantidadDelta: d.delta,
+          stockResultante: matched ? matched.inventario : 0,
+          referencia,
+          notas: d.noteSuffix
+            ? `Cliente: ${clienteNombre} · ${d.noteSuffix}`
+            : `Cliente: ${clienteNombre}`,
+        });
+      }
+    }
+    return out;
+  };
+
   const makeLocalMovimientos = (
     items: Omit<MovimientoInventario, 'id'>[]
   ): MovimientoInventario[] => {
@@ -1465,56 +1507,65 @@ export default function App() {
   ): Promise<Ticket> => {
     const deductGeneralInventory =
       Boolean(options?.deductGeneralInventory) && !draft.jornadaId;
+    const totals = computeTicketTotals(draft.items, draft);
+    const normalizedDraft: Omit<Ticket, 'folio' | 'detalleTexto'> = {
+      ...draft,
+      totalPiezas: totals.totalPiezas,
+      totalImporte: totals.totalImporte,
+      subtotalBruto: totals.subtotalBruto,
+      ...(totals.descuentoMonto > 0
+        ? {
+            descuentoTipo: totals.descuentoTipo,
+            descuentoValor: totals.descuentoValor,
+            descuentoMonto: totals.descuentoMonto,
+            ...(totals.descuentoMotivo ? { descuentoMotivo: totals.descuentoMotivo } : {}),
+          }
+        : {}),
+    };
 
     if (shouldSaveOffline()) {
       const tempFolio = generateNextFolio(
         dataset.tickets.map((t) => t.folio),
         'AST'
       );
-      const detalleTexto = draft.items
-        .map((it) => `${it.cantidad}x ${it.productoNombre} ($${it.subtotal.toFixed(2)})`)
-        .join(', ');
+      const detalleTexto = buildTicketDetalleTexto(normalizedDraft.items, normalizedDraft);
       const localTicket: Ticket = {
-        ...draft,
+        ...normalizedDraft,
         folio: tempFolio,
         detalleTexto,
         rowNumber: -1,
       };
-      const deltas: InventoryDelta[] = deductGeneralInventory
-        ? draft.items.map((it) => ({
-            productoId: it.productoId,
-            productoNombre: it.productoNombre,
-            delta: -it.cantidad,
-          }))
-        : [];
-      const nextProductos = deductGeneralInventory
-        ? applyLocalInventoryDeltas(dataset.productos, deltas)
-        : dataset.productos;
+      const { stockDeltas, kardexGroups } = deductGeneralInventory
+        ? computeTicketGeneralInventoryEffects(normalizedDraft.items)
+        : { stockDeltas: [], kardexGroups: [] };
+      const nextProductos =
+        deductGeneralInventory && stockDeltas.length > 0
+          ? applyLocalInventoryDeltas(dataset.productos, stockDeltas)
+          : dataset.productos;
 
       const localMovs = deductGeneralInventory
         ? makeLocalMovimientos(
-            buildMovimientosFromDeltas(
-              deltas,
-              'Venta directa',
+            buildTicketKardexMovimientos(
+              kardexGroups,
               tempFolio,
-              `Cliente: ${draft.clienteNombre}`,
-              draft.fecha,
+              normalizedDraft.clienteNombre,
+              normalizedDraft.fecha,
               nextProductos
             )
           )
         : [];
 
-      const nextJornadas = draft.jornadaId
+      const nextJornadas = normalizedDraft.jornadaId
         ? dataset.jornadas.map((j) =>
-            j.id === draft.jornadaId
+            j.id === normalizedDraft.jornadaId
               ? {
                   ...j,
                   ticketFolios: j.ticketFolios.includes(tempFolio)
                     ? j.ticketFolios
                     : [...j.ticketFolios, tempFolio],
                   totalTickets: j.totalTickets + 1,
-                  totalPiezas: j.totalPiezas + draft.totalPiezas,
-                  totalImporte: j.totalImporte + draft.totalImporte,
+                  totalPiezas: j.totalPiezas + normalizedDraft.totalPiezas,
+                  totalImporte: j.totalImporte + normalizedDraft.totalImporte,
                 }
               : j
           )
@@ -1524,10 +1575,10 @@ export default function App() {
         {
           qid: `q-${Date.now()}`,
           createdAt: new Date().toISOString(),
-          summary: `Ticket ${tempFolio} (${draft.clienteNombre})`,
+          summary: `Ticket ${tempFolio} (${normalizedDraft.clienteNombre})`,
           type: 'create_ticket',
           tempFolio,
-          draft,
+          draft: normalizedDraft,
           deductGeneralInventory,
         },
         {
@@ -1543,11 +1594,11 @@ export default function App() {
 
     const token = getAccessToken()!;
     const tab = requireTab('tickets');
-    const saved = await appendTicketSafe(token, spreadsheetId, tab, draft);
+    const saved = await appendTicketSafe(token, spreadsheetId, tab, normalizedDraft);
     let activeMapping = tabMapping;
 
-    if (draft.jornadaId && activeMapping.jornadas) {
-      const targetJornada = dataset.jornadas.find((j) => j.id === draft.jornadaId);
+    if (normalizedDraft.jornadaId && activeMapping.jornadas) {
+      const targetJornada = dataset.jornadas.find((j) => j.id === normalizedDraft.jornadaId);
       if (targetJornada && targetJornada.rowNumber && targetJornada.rowNumber >= 2) {
         const existingTickets = dataset.tickets.filter(
           (t) =>
@@ -1564,30 +1615,29 @@ export default function App() {
         });
       }
     } else if (deductGeneralInventory && activeMapping.productos) {
-      const deltas = draft.items.map((it) => ({
-        productoId: it.productoId,
-        productoNombre: it.productoNombre,
-        delta: -it.cantidad,
-      }));
-      const postProducts = applyLocalInventoryDeltas(dataset.productos, deltas);
-      await adjustProductosInventarioByDelta(
-        token,
-        spreadsheetId,
-        activeMapping.productos,
-        deltas
+      const { stockDeltas, kardexGroups } = computeTicketGeneralInventoryEffects(
+        normalizedDraft.items
       );
-      activeMapping = await appendMovimientosSmart(
-        token,
-        buildMovimientosFromDeltas(
-          deltas,
-          'Venta directa',
-          saved.folio,
-          `Cliente: ${draft.clienteNombre}`,
-          draft.fecha,
-          postProducts
-        ),
-        activeMapping
+      let postProducts = dataset.productos;
+      if (stockDeltas.length > 0) {
+        postProducts = applyLocalInventoryDeltas(dataset.productos, stockDeltas);
+        await adjustProductosInventarioByDelta(
+          token,
+          spreadsheetId,
+          activeMapping.productos,
+          stockDeltas
+        );
+      }
+      const movs = buildTicketKardexMovimientos(
+        kardexGroups,
+        saved.folio,
+        normalizedDraft.clienteNombre,
+        normalizedDraft.fecha,
+        postProducts
       );
+      if (movs.length > 0) {
+        activeMapping = await appendMovimientosSmart(token, movs, activeMapping);
+      }
     }
 
     await syncSpreadsheetData(spreadsheetId, activeMapping);
@@ -2446,6 +2496,11 @@ export default function App() {
                 tipoVenta: ticket.tipoVenta,
                 totalPiezas: ticket.totalPiezas,
                 totalImporte: ticket.totalImporte,
+                ...(ticket.subtotalBruto !== undefined ? { subtotalBruto: ticket.subtotalBruto } : {}),
+                ...(ticket.descuentoTipo !== undefined ? { descuentoTipo: ticket.descuentoTipo } : {}),
+                ...(ticket.descuentoValor !== undefined ? { descuentoValor: ticket.descuentoValor } : {}),
+                ...(ticket.descuentoMonto !== undefined ? { descuentoMonto: ticket.descuentoMonto } : {}),
+                ...(ticket.descuentoMotivo !== undefined ? { descuentoMotivo: ticket.descuentoMotivo } : {}),
                 jornadaId: ticket.jornadaId,
                 items: ticket.items,
                 ...(ticket.metodoPago !== undefined ? { metodoPago: ticket.metodoPago } : {}),
@@ -3805,6 +3860,10 @@ export default function App() {
               logoUrl={logoUrl}
               spreadsheetTitle={spreadsheetTitle}
               onNavigate={setActiveModule}
+              onOpenInactiveClients={() => {
+                setClientesInitialInactiveFilter(true);
+                setActiveModule('clientes');
+              }}
               onOpenSheetSetup={() => setShowSheetSetup(true)}
               onOpenAppearance={() => setShowAppearanceModal(true)}
               onRefreshData={() =>
@@ -3869,6 +3928,8 @@ export default function App() {
               onUpdateCliente={handleUpdateCliente}
               onUpdateRuta={handleUpdateRuta}
               onNavigateToAddCliente={() => setActiveModule('agregar-cliente')}
+              initialOnlyInactive15={clientesInitialInactiveFilter}
+              onConsumeInitialInactiveFilter={() => setClientesInitialInactiveFilter(false)}
             />
           )}
 

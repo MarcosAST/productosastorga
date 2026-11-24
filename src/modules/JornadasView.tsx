@@ -40,9 +40,11 @@ import {
   formatCurrency,
   formatDateShort,
   formatNumber,
+  getClientInactivityInfo,
   getTodayISO,
   normalizeText,
 } from '../utils/formatters';
+import { getTicketJornadaSoldDelta } from '../utils/ticketAdjustments';
 import { getJornadaExpenses } from '../utils/incomeConsolidation';
 import { getTicketPaymentSummary } from '../utils/paymentHelpers';
 import {
@@ -200,18 +202,20 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
     [selectedJornada, dataset.tickets]
   );
 
-  // Compute live sold count by productId / normalized name for a jornada's tickets
+  // Compute live sold/dispatched count by productId / normalized name for a jornada's tickets
   const computeSoldByProduct = (tickets: Ticket[]) => {
     const byId = new Map<string, number>();
     const byName = new Map<string, number>();
     for (const t of tickets) {
       for (const it of t.items) {
+        const delta = getTicketJornadaSoldDelta(it);
+        if (delta === 0) continue;
         if (it.productoId) {
-          byId.set(it.productoId, (byId.get(it.productoId) || 0) + it.cantidad);
+          byId.set(it.productoId, (byId.get(it.productoId) || 0) + delta);
         }
         if (it.productoNombre) {
           const n = normalizeText(it.productoNombre);
-          byName.set(n, (byName.get(n) || 0) + it.cantidad);
+          byName.set(n, (byName.get(n) || 0) + delta);
         }
       }
     }
@@ -1698,6 +1702,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                   <div className="divide-y divide-[#EFECE6] max-h-[360px] overflow-y-auto">
                     {selectedVisitRows.map(({ cliente, hasOrder, estado, notas: vNotas, draftKey }) => {
                       const digits = sanitizePhoneDigits(cliente.telefono);
+                      const inactivity = getClientInactivityInfo(cliente, dataset.tickets);
                       return (
                         <div
                           key={cliente.id}
@@ -1739,6 +1744,14 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                               <p className="text-sm font-bold text-[#1F1A17] truncate">
                                 {cliente.nombre}
                               </p>
+                              {!hasOrder &&
+                                inactivity.isInactiveOver15Days &&
+                                inactivity.daysSinceLastPurchase !== null && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-300 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                                    <AlertTriangle className="w-3 h-3 text-amber-700" />
+                                    <span>{inactivity.daysSinceLastPurchase}d sin compra</span>
+                                  </span>
+                                )}
                             </div>
                             <input
                               type="text"

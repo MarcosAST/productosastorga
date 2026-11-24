@@ -40,6 +40,7 @@ import {
   getGeneralEgresos,
   getJornadaAssignedEgresos,
 } from '../utils/incomeConsolidation';
+import { getTicketItemSalesStatsDelta } from '../utils/ticketAdjustments';
 import {
   computeCustomChartData,
   CustomChartConfig,
@@ -159,15 +160,12 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
     const egresos = scopedGeneralEgresos.reduce((s, e) => s + e.monto, 0);
     const sueldos = scopedSueldos.reduce((s, su) => s + su.monto, 0);
     const utilidadPreliminar = incomeSummary.totalIngresos - egresos;
-    const utilidadNeta = utilidadPreliminar - sueldos;
+    const utilidadNeta = utilidadPreliminar;
     const margenNeto =
       incomeSummary.totalIngresos > 0
         ? (utilidadNeta / incomeSummary.totalIngresos) * 100
         : 0;
-    const margenPreliminar =
-      incomeSummary.totalIngresos > 0
-        ? (utilidadPreliminar / incomeSummary.totalIngresos) * 100
-        : 0;
+    const margenPreliminar = margenNeto;
 
     return {
       ingresos: incomeSummary.totalIngresos,
@@ -270,7 +268,7 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
 
     const list = Array.from(map.values()).map((row) => {
       const utilidadPreliminar = row.ingresos - row.egresosOp;
-      const utilidadNeta = utilidadPreliminar - row.sueldos;
+      const utilidadNeta = utilidadPreliminar;
       const margenNeto = row.ingresos > 0 ? (utilidadNeta / row.ingresos) * 100 : 0;
       return { ...row, utilidadPreliminar, utilidadNeta, margenNeto };
     });
@@ -285,13 +283,14 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
     const map = new Map<string, { nombre: string; piezas: number; importe: number }>();
     for (const t of scopedTickets) {
       for (const it of t.items) {
+        const delta = getTicketItemSalesStatsDelta(it);
         const curr = map.get(it.productoNombre) || {
           nombre: it.productoNombre,
           piezas: 0,
           importe: 0,
         };
-        curr.piezas += it.cantidad;
-        curr.importe += it.subtotal;
+        curr.piezas += delta.piezasVendidas;
+        curr.importe += delta.importe;
         map.set(it.productoNombre, curr);
       }
     }
@@ -409,23 +408,26 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
         pct(c.value),
       ]),
       ['TOTAL EGRESOS OPERATIVOS', kpis.egresos.toFixed(2), pct(kpis.egresos)],
-      ['UTILIDAD PRELIMINAR', kpis.utilidadPreliminar.toFixed(2), pct(kpis.utilidadPreliminar)],
+      ['UTILIDAD NETA DEL PERIODO (Ingresos - Egresos)', kpis.utilidadNeta.toFixed(2), pct(kpis.utilidadNeta)],
       ['', '', ''],
-      ['GASTOS DE NÓMINA / SUELDOS', '', ''],
+      ['SUELDOS (REGISTRO SEPARADO — SALEN DE UTILIDAD)', '', ''],
       ...sueldosPorTrabajador.map((s) => [
         `  - ${s.name}`,
         s.value.toFixed(2),
         pct(s.value),
       ]),
-      ['TOTAL SUELDOS', kpis.sueldos.toFixed(2), pct(kpis.sueldos)],
-      ['UTILIDAD NETA DEL PERIODO', kpis.utilidadNeta.toFixed(2), pct(kpis.utilidadNeta)],
+      ['TOTAL SUELDOS (SEPARADO)', kpis.sueldos.toFixed(2), pct(kpis.sueldos)],
     ];
 
     if (periodMode === 'mes') {
       const fondoBase = currentFinanzaMes?.fondoBase ?? 0;
       rows.push(['', '', '']);
       rows.push(['Fondo base del mes', fondoBase.toFixed(2), '']);
-      rows.push(['Fondo total acumulado', (fondoBase + kpis.utilidadNeta).toFixed(2), '']);
+      rows.push([
+        'Fondo total acumulado',
+        (fondoBase + kpis.ingresos - kpis.egresos - kpis.sueldos).toFixed(2),
+        '',
+      ]);
     }
 
     downloadCsv(
@@ -512,10 +514,11 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
       const salesByProd = new Map<string, { piezas: number; importe: number }>();
       for (const t of scopedTickets) {
         for (const it of t.items) {
+          const delta = getTicketItemSalesStatsDelta(it);
           const key = normalizeText(it.productoNombre);
           const curr = salesByProd.get(key) || { piezas: 0, importe: 0 };
-          curr.piezas += it.cantidad;
-          curr.importe += it.subtotal;
+          curr.piezas += delta.piezasVendidas;
+          curr.importe += delta.importe;
           salesByProd.set(key, curr);
         }
       }
@@ -565,7 +568,7 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
           egresosOp: m.egresosOp,
           sueldos: m.sueldos,
           utilidadNeta: m.utilidadNeta,
-          fondoTotal: fondoBase + m.utilidadNeta,
+          fondoTotal: fondoBase + m.ingresos - m.egresosOp - m.sueldos,
         };
       });
       return {
@@ -764,7 +767,7 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
       </div>
 
       {/* Consolidated KPI Strip */}
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+      <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
         <div className="rounded-2xl bg-white border border-[#E7E3DC] p-4">
           <p className="text-xs font-medium text-[#6E6259]">Ingresos consolidados</p>
           <p className="text-xl sm:text-2xl font-bold text-[#1F1A17] tabular-nums mt-1">
@@ -785,12 +788,12 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
           </p>
         </div>
         <div className="rounded-2xl bg-white border border-[#E7E3DC] p-4">
-          <p className="text-xs font-medium text-[#6E6259]">Gastos y sueldos</p>
+          <p className="text-xs font-medium text-[#6E6259]">Egresos</p>
           <p className="text-xl sm:text-2xl font-bold text-[#B91C1C] tabular-nums mt-1">
-            {formatCurrency(kpis.egresos + kpis.sueldos)}
+            {formatCurrency(kpis.egresos)}
           </p>
-          <p className="text-xs text-[#8C7E73] tabular-nums mt-0.5">
-            Egr: {formatCurrency(kpis.egresos)} · Sue: {formatCurrency(kpis.sueldos)}
+          <p className="text-xs text-[#8C7E73] mt-0.5">
+            Solo gastos operativos
           </p>
         </div>
         <div className="rounded-2xl bg-white border border-[#E7E3DC] p-4">
@@ -803,7 +806,16 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
             {formatCurrency(kpis.utilidadNeta)}
           </p>
           <p className="text-xs text-[#8C7E73] tabular-nums mt-0.5">
-            Margen neto: {kpis.margenNeto.toFixed(1)}%
+            Ingresos − Egresos ({kpis.margenNeto.toFixed(1)}%)
+          </p>
+        </div>
+        <div className="col-span-2 sm:col-span-1 rounded-2xl bg-[#FAF8F5] border border-[#E7E3DC] p-4">
+          <p className="text-xs font-medium text-[#6E6259]">Sueldos (separado)</p>
+          <p className="text-xl sm:text-2xl font-bold text-[var(--theme-accent)] tabular-nums mt-1">
+            {formatCurrency(kpis.sueldos)}
+          </p>
+          <p className="text-xs text-[#8C7E73] mt-0.5">
+            Salen de utilidad (no restan)
           </p>
         </div>
       </section>
@@ -1012,14 +1024,14 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
                 )}
               </section>
 
-              {/* Chart 2: Monthly Consolidated Income vs Expenses + Salaries */}
+              {/* Chart 2: Monthly Consolidated Income vs Expenses vs Salaries (separated) */}
               <section className="rounded-2xl bg-white border border-[#E7E3DC] p-5 space-y-4">
                 <div>
                   <h3 className="text-base font-bold text-[#1F1A17]">
-                    Ingresos vs. Egresos y sueldos (últimos meses)
+                    Ingresos vs. Egresos vs. Sueldos (últimos meses)
                   </h3>
                   <p className="text-xs text-[#8C7E73]">
-                    Incluye jornadas, tickets directos y otros ingresos frente a egresos y nómina.
+                    Muestra ingresos consolidados, egresos operativos y sueldos por separado.
                   </p>
                 </div>
                 {mensualUltimos6.length === 0 ? (
@@ -1039,7 +1051,11 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
                         <Tooltip
                           formatter={(val: any, name: any) => [
                             formatCurrency(Number(val)),
-                            name === 'ingresos' ? 'Ingresos totales' : 'Egresos + Sueldos',
+                            name === 'ingresos'
+                              ? 'Ingresos totales'
+                              : name === 'egresosOp'
+                              ? 'Egresos'
+                              : 'Sueldos (separado)',
                           ]}
                           contentStyle={{
                             borderRadius: '12px',
@@ -1049,11 +1065,16 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
                         />
                         <Legend
                           formatter={(value) =>
-                            value === 'ingresos' ? 'Ingresos totales' : 'Egresos y sueldos'
+                            value === 'ingresos'
+                              ? 'Ingresos'
+                              : value === 'egresosOp'
+                              ? 'Egresos'
+                              : 'Sueldos'
                           }
                         />
                         <Bar dataKey="ingresos" fill="#15803D" radius={[6, 6, 0, 0]} />
-                        <Bar dataKey="egresos" fill="var(--theme-accent)" radius={[6, 6, 0, 0]} />
+                        <Bar dataKey="egresosOp" fill="#B91C1C" radius={[6, 6, 0, 0]} />
+                        <Bar dataKey="sueldos" fill="var(--theme-accent)" radius={[6, 6, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
@@ -1300,66 +1321,10 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
                     </td>
                   </tr>
 
-                  {/* Utilidad Preliminar */}
-                  <tr className="font-bold bg-white">
-                    <td className="px-5 py-3.5 text-[#1F1A17]">
-                      UTILIDAD PRELIMINAR (Antes de sueldos)
-                    </td>
-                    <td
-                      className={`px-5 py-3.5 text-right tabular-nums ${
-                        kpis.utilidadPreliminar >= 0 ? 'text-[#1F1A17]' : 'text-[#B91C1C]'
-                      }`}
-                    >
-                      {formatCurrency(kpis.utilidadPreliminar)}
-                    </td>
-                    <td className="px-5 py-3.5 text-right tabular-nums text-[#6E6259]">
-                      {kpis.margenPreliminar.toFixed(1)}%
-                    </td>
-                  </tr>
-
-                  {/* Sueldos */}
-                  <tr className="bg-[var(--theme-tint)]">
-                    <td colSpan={3} className="px-5 py-2 text-xs font-bold uppercase tracking-wider text-[var(--theme-primary)]">
-                      3. Nómina y Sueldos
-                    </td>
-                  </tr>
-                  {sueldosPorTrabajador.length === 0 ? (
-                    <tr>
-                      <td colSpan={3} className="px-5 py-3 text-xs text-[#8C7E73]">
-                        Sin sueldos registrados en este periodo.
-                      </td>
-                    </tr>
-                  ) : (
-                    sueldosPorTrabajador.map((s) => (
-                      <tr key={`su-${s.name}`}>
-                        <td className="pl-8 pr-5 py-2.5 text-[#1F1A17]">{s.name}</td>
-                        <td className="px-5 py-2.5 text-right tabular-nums text-[#B91C1C]">
-                          −{formatCurrency(s.value)}
-                        </td>
-                        <td className="px-5 py-2.5 text-right tabular-nums text-[#6E6259]">
-                          {incomeSummary.totalIngresos > 0
-                            ? `${((s.value / incomeSummary.totalIngresos) * 100).toFixed(1)}%`
-                            : '0.0%'}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                  <tr className="bg-[#FAF8F5] font-bold">
-                    <td className="px-5 py-3 text-[#1F1A17]">TOTAL SUELDOS</td>
-                    <td className="px-5 py-3 text-right tabular-nums text-[#B91C1C]">
-                      −{formatCurrency(kpis.sueldos)}
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums text-[#6E6259]">
-                      {incomeSummary.totalIngresos > 0
-                        ? `${((kpis.sueldos / incomeSummary.totalIngresos) * 100).toFixed(1)}%`
-                        : '0.0%'}
-                    </td>
-                  </tr>
-
-                  {/* Utilidad Neta */}
+                  {/* Utilidad Neta (solo resta egresos) */}
                   <tr className={kpis.utilidadNeta >= 0 ? 'bg-emerald-50' : 'bg-red-50'}>
                     <td className="px-5 py-4 text-base font-bold text-[#1F1A17]">
-                      UTILIDAD NETA DEL PERIODO
+                      UTILIDAD NETA DEL PERIODO (Ingresos − Egresos)
                     </td>
                     <td
                       className={`px-5 py-4 text-right text-base font-bold tabular-nums ${
@@ -1389,15 +1354,61 @@ export const ReportesGraficasView: React.FC<ReportesGraficasViewProps> = ({
                       </tr>
                       <tr className="bg-white font-bold">
                         <td className="px-5 py-3 text-sm text-[var(--theme-primary)]">
-                          FONDO TOTAL ACUMULADO AL CIERRE
+                          FONDO TOTAL ACUMULADO AL CIERRE (Base + Ingresos − Egresos − Sueldos)
                         </td>
                         <td className="px-5 py-3 text-right text-sm tabular-nums text-[var(--theme-primary)]">
-                          {formatCurrency((currentFinanzaMes?.fondoBase ?? 0) + kpis.utilidadNeta)}
+                          {formatCurrency(
+                            (currentFinanzaMes?.fondoBase ?? 0) +
+                              kpis.ingresos -
+                              kpis.egresos -
+                              kpis.sueldos
+                          )}
                         </td>
                         <td />
                       </tr>
                     </>
                   )}
+
+                  {/* Sueldos separados (salen de la utilidad, no restan) */}
+                  <tr className="bg-[var(--theme-tint)]">
+                    <td colSpan={3} className="px-5 py-2 text-xs font-bold uppercase tracking-wider text-[var(--theme-primary)]">
+                      3. Sueldos (Registro separado — salen de la utilidad)
+                    </td>
+                  </tr>
+                  {sueldosPorTrabajador.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="px-5 py-3 text-xs text-[#8C7E73]">
+                        Sin sueldos registrados en este periodo.
+                      </td>
+                    </tr>
+                  ) : (
+                    sueldosPorTrabajador.map((s) => (
+                      <tr key={`su-${s.name}`}>
+                        <td className="pl-8 pr-5 py-2.5 text-[#1F1A17]">{s.name}</td>
+                        <td className="px-5 py-2.5 text-right tabular-nums text-[var(--theme-accent)] font-semibold">
+                          {formatCurrency(s.value)}
+                        </td>
+                        <td className="px-5 py-2.5 text-right tabular-nums text-[#6E6259]">
+                          {incomeSummary.totalIngresos > 0
+                            ? `${((s.value / incomeSummary.totalIngresos) * 100).toFixed(1)}%`
+                            : '0.0%'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                  <tr className="bg-[#FAF8F5] font-bold">
+                    <td className="px-5 py-3 text-[#1F1A17]">
+                      TOTAL SUELDOS (Separado, no resta de utilidad)
+                    </td>
+                    <td className="px-5 py-3 text-right tabular-nums text-[var(--theme-accent)]">
+                      {formatCurrency(kpis.sueldos)}
+                    </td>
+                    <td className="px-5 py-3 text-right tabular-nums text-[#6E6259]">
+                      {incomeSummary.totalIngresos > 0
+                        ? `${((kpis.sueldos / incomeSummary.totalIngresos) * 100).toFixed(1)}%`
+                        : '0.0%'}
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>

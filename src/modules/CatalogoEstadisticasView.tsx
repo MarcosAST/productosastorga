@@ -24,6 +24,7 @@ import {
   getTodayISO,
   normalizeText,
 } from '../utils/formatters';
+import { getTicketItemSalesStatsDelta } from '../utils/ticketAdjustments';
 import { PendingMutation } from '../components/ConfirmMutationModal';
 
 interface CatalogoEstadisticasViewProps {
@@ -55,6 +56,8 @@ const MOVIMIENTO_TIPOS_FILTRO: MovimientoInventarioTipo[] = [
   'Ajuste manual',
   'Merma',
   'Cortesía',
+  'Devolución cliente',
+  'Cambio cliente',
   'Venta directa',
   'Carga jornada',
   'Devolución jornada',
@@ -163,6 +166,7 @@ export const CatalogoEstadisticasView: React.FC<CatalogoEstadisticasViewProps> =
     for (const t of dataset.tickets) {
       const seenInTicket = new Set<string>();
       for (const it of t.items) {
+        const delta = getTicketItemSalesStatsDelta(it);
         const key = normalizeText(it.productoNombre);
         const curr = stats.get(key) || {
           nombre: it.productoNombre,
@@ -170,8 +174,8 @@ export const CatalogoEstadisticasView: React.FC<CatalogoEstadisticasViewProps> =
           ingresos: 0,
           tickets: 0,
         };
-        curr.piezas += it.cantidad;
-        curr.ingresos += it.subtotal;
+        curr.piezas += delta.piezasVendidas;
+        curr.ingresos += delta.importe;
         if (!seenInTicket.has(key)) {
           curr.tickets += 1;
           seenInTicket.add(key);
@@ -206,8 +210,14 @@ export const CatalogoEstadisticasView: React.FC<CatalogoEstadisticasViewProps> =
           (it) => normalizeText(it.productoNombre) === normalizeText(selectedProdFilter)
         );
         if (matchedItems.length === 0) continue;
-        ticketPieces = matchedItems.reduce((s, it) => s + it.cantidad, 0);
-        ticketAmount = matchedItems.reduce((s, it) => s + it.subtotal, 0);
+        ticketPieces = matchedItems.reduce(
+          (s, it) => s + getTicketItemSalesStatsDelta(it).piezasVendidas,
+          0
+        );
+        ticketAmount = matchedItems.reduce(
+          (s, it) => s + getTicketItemSalesStatsDelta(it).importe,
+          0
+        );
       }
 
       const key = `${normalizeText(t.clienteNombre)}::${normalizeText(t.ruta)}`;
@@ -783,12 +793,18 @@ export const CatalogoEstadisticasView: React.FC<CatalogoEstadisticasViewProps> =
                 <tbody className="divide-y divide-[#EFECE6] text-xs">
                   {filteredKardex.map((m) => {
                     const isPositive = m.cantidadDelta > 0;
+                    const isZero = m.cantidadDelta === 0;
                     const isMerma = m.tipo === 'Merma' || m.tipo === 'Faltante jornada' || m.tipo === 'Cortesía';
-                    const badgeClass = isMerma
-                      ? 'bg-amber-50 text-amber-800 border-amber-200'
-                      : isPositive
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                      : 'bg-[#FAF8F5] text-[#49403A] border-[#E7E3DC]';
+                    const badgeClass =
+                      m.tipo === 'Devolución cliente'
+                        ? 'bg-sky-50 text-sky-700 border-sky-200'
+                        : m.tipo === 'Cambio cliente'
+                        ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        : isMerma
+                        ? 'bg-amber-50 text-amber-800 border-amber-200'
+                        : isPositive
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : 'bg-[#FAF8F5] text-[#49403A] border-[#E7E3DC]';
                     return (
                       <tr key={m.id} className="hover:bg-[#FAF8F5]">
                         <td className="py-3 px-4 text-[#6E6259] whitespace-nowrap">
@@ -804,7 +820,7 @@ export const CatalogoEstadisticasView: React.FC<CatalogoEstadisticasViewProps> =
                         </td>
                         <td
                           className={`py-3 px-4 text-right font-mono font-bold tabular-nums ${
-                            isPositive ? 'text-emerald-700' : 'text-red-700'
+                            isZero ? 'text-[#6E6259]' : isPositive ? 'text-emerald-700' : 'text-red-700'
                           }`}
                         >
                           {isPositive ? `+${formatNumber(m.cantidadDelta)}` : formatNumber(m.cantidadDelta)}

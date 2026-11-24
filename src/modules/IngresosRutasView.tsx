@@ -34,6 +34,7 @@ import {
   buildConsolidatedIncomeEntries,
   ConsolidatedIncomeEntry,
 } from '../utils/incomeConsolidation';
+import { getTicketItemTipo, getTicketSummary } from '../utils/ticketAdjustments';
 import { PendingMutation } from '../components/ConfirmMutationModal';
 
 interface IngresosRutasViewProps {
@@ -643,18 +644,61 @@ export const IngresosRutasView: React.FC<IngresosRutasViewProps> = ({
             </div>
           </div>
 
-          {t.items.length > 0 && (
-            <div className="pl-0 sm:pl-4 space-y-1 border-t border-[#F4F1EB] pt-2 text-xs text-[#49403A]">
-              {t.items.map((it, i) => (
-                <div key={i} className="flex items-center justify-between gap-2 tabular-nums">
-                  <span>
-                    <strong>{it.cantidad}</strong> × {it.productoNombre}
-                  </span>
-                  <span className="text-[#6E6259]">{formatCurrency(it.subtotal)}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {t.items.length > 0 && (() => {
+            const summary = getTicketSummary(t);
+            return (
+              <div className="pl-0 sm:pl-4 space-y-1 border-t border-[#F4F1EB] pt-2 text-xs text-[#49403A]">
+                {t.items.map((it, i) => {
+                  const tipo = getTicketItemTipo(it);
+                  return (
+                    <div key={i} className="flex items-center justify-between gap-2 tabular-nums">
+                      <span className="flex items-center gap-1.5 flex-wrap">
+                        <strong>{it.cantidad}</strong> × {it.productoNombre}
+                        {tipo !== 'Venta' && (
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                              tipo === 'Devolución'
+                                ? 'bg-red-50 text-red-700'
+                                : tipo === 'Cortesía'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : 'bg-sky-50 text-sky-700'
+                            }`}
+                          >
+                            {tipo}
+                          </span>
+                        )}
+                      </span>
+                      <span
+                        className={
+                          tipo === 'Devolución'
+                            ? 'text-red-700 font-semibold'
+                            : tipo === 'Cortesía' || tipo === 'Cambio'
+                            ? 'text-emerald-700 font-semibold'
+                            : 'text-[#6E6259]'
+                        }
+                      >
+                        {tipo === 'Devolución'
+                          ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                          : formatCurrency(it.subtotal)}
+                      </span>
+                    </div>
+                  );
+                })}
+                {summary.descuentoMonto > 0 && (
+                  <div className="flex items-center justify-between gap-2 text-emerald-700 font-semibold pt-0.5">
+                    <span>
+                      Descuento
+                      {summary.descuentoTipo === 'porcentaje' && summary.descuentoValor > 0
+                        ? ` (${summary.descuentoValor}%)`
+                        : ''}
+                      {summary.descuentoMotivo ? ` · ${summary.descuentoMotivo}` : ''}
+                    </span>
+                    <span className="tabular-nums">-{formatCurrency(summary.descuentoMonto)}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       );
     }

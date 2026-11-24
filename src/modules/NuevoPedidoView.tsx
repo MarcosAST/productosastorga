@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Plus,
   Minus,
@@ -19,15 +20,21 @@ import {
   Wallet,
   BookmarkCheck,
   ListFilter,
+  Gift,
+  Undo2,
+  RefreshCw,
+  Percent,
 } from 'lucide-react';
 import {
   BusinessDataset,
+  DescuentoTipo,
   EstadoPago,
   MetodoPago,
   Producto,
   Ticket,
   TicketAbono,
   TicketItem,
+  TicketItemTipo,
   TipoVenta,
 } from '../types/business';
 import {
@@ -39,7 +46,21 @@ import {
   normalizeText,
 } from '../utils/formatters';
 import { getTicketPaymentSummary, roundMoney } from '../utils/paymentHelpers';
-import { buildWhatsAppTicketUrl, downloadTicketReceiptPng } from '../utils/ticketShare';
+import {
+  computeTicketItemPricing,
+  computeTicketTotals,
+  getTicketItemTipo,
+  getTicketJornadaSoldDelta,
+  getTicketSummary,
+  normalizeTicketItem,
+} from '../utils/ticketAdjustments';
+import {
+  buildWhatsAppTicketUrl,
+  BUSINESS_BRANDING,
+  downloadTicketReceiptPng,
+  resolveLogoDataUrl,
+} from '../utils/ticketShare';
+import { DEFAULT_LOGO_PATH } from '../utils/themeManager';
 import { PendingMutation } from '../components/ConfirmMutationModal';
 
 const CLIENT_PRODUCTS_STORAGE_KEY = 'astorga_client_products_v1';
@@ -108,6 +129,19 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
   const [searchProduct, setSearchProduct] = useState('');
   const [cart, setCart] = useState<Record<string, number>>({});
   const [customPrices, setCustomPrices] = useState<Record<string, string>>({});
+  const [adjustmentLines, setAdjustmentLines] = useState<TicketItem[]>([]);
+  const [adjMode, setAdjMode] = useState<'Cortesía' | 'Devolución' | 'Cambio' | null>(null);
+  const [adjProductId, setAdjProductId] = useState('');
+  const [adjQty, setAdjQty] = useState('1');
+  const [adjUnitPrice, setAdjUnitPrice] = useState('');
+  const [adjRegresarInv, setAdjRegresarInv] = useState(true);
+  const [adjMotivo, setAdjMotivo] = useState('');
+
+  const [showDiscountForm, setShowDiscountForm] = useState(false);
+  const [descuentoTipo, setDescuentoTipo] = useState<DescuentoTipo>('monto');
+  const [descuentoValor, setDescuentoValor] = useState('');
+  const [descuentoMotivo, setDescuentoMotivo] = useState('');
+
   const [paymentMode, setPaymentMode] = useState<'Pagado' | 'Parcial' | 'Crédito'>('Pagado');
   const [metodoPago, setMetodoPago] = useState<MetodoPago>('Efectivo');
   const [abonoInicial, setAbonoInicial] = useState('');
@@ -225,12 +259,14 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
     const soldByName = new Map<string, number>();
     for (const t of linkedTickets) {
       for (const it of t.items) {
+        const delta = getTicketJornadaSoldDelta(it);
+        if (delta === 0) continue;
         if (it.productoId) {
-          soldById.set(it.productoId, (soldById.get(it.productoId) || 0) + it.cantidad);
+          soldById.set(it.productoId, (soldById.get(it.productoId) || 0) + delta);
         }
         if (it.productoNombre) {
           const n = normalizeText(it.productoNombre);
-          soldByName.set(n, (soldByName.get(n) || 0) + it.cantidad);
+          soldByName.set(n, (soldByName.get(n) || 0) + delta);
         }
       }
     }
@@ -377,21 +413,86 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
         productoNombre: prod.nombre,
         cantidad: qty,
         precioUnitario,
-        subtotal: qty * precioUnitario,
+        subtotal: roundMoney(qty * precioUnitario),
       });
     }
+    for (const adj of adjustmentLines) {
+      if (adj.cantidad > 0) {
+        list.push(normalizeTicketItem(adj));
+      }
+    }
     return list;
-  }, [cart, customPrices, dataset.productos, tipoVenta]);
+  }, [cart, customPrices, dataset.productos, tipoVenta, adjustmentLines]);
 
-  const totalPiezas = useMemo(
-    () => cartItems.reduce((sum, item) => sum + item.cantidad, 0),
-    [cartItems]
+  const ticketTotals = useMemo(
+    () =>
+      computeTicketTotals(cartItems, {
+        descuentoTipo,
+        descuentoValor: parseFloat(descuentoValor) || 0,
+        descuentoMotivo,
+      }),
+    [cartItems, descuentoTipo, descuentoValor, descuentoMotivo]
   );
 
-  const totalImporte = useMemo(
-    () => cartItems.reduce((sum, item) => sum + item.subtotal, 0),
-    [cartItems]
-  );
+  const totalPiezas = ticketTotals.totalPiezas;
+  const totalImporte = ticketTotals.totalImporte;
+
+  const openAdjustmentForm = (mode: 'Cortesía' | 'Devolución' | 'Cambio') => {
+    setAdjMode(mode);
+    const defaultProdId =
+      rememberedClientProductIds[0] || activeProducts[0]?.id || '';
+    setAdjProductId(defaultProdId);
+    setAdjQty('1');
+    const prod = activeProducts.find((p) => p.id === defaultProdId);
+    setAdjUnitPrice(
+      mode === 'Devolución' && prod ? String(getCatalogPrice(prod)) : '0'
+    );
+    setAdjRegresarInv(mode === 'Devolución');
+    setAdjMotivo('');
+  };
+
+  const handleSelectAdjProduct = (prodId: string) => {
+    setAdjProductId(prodId);
+    const prod = activeProducts.find((p) => p.id === prodId);
+    if (adjMode === 'Devolución' && prod) {
+      setAdjUnitPrice(String(getCatalogPrice(prod)));
+    }
+  };
+
+  const handleAddAdjustmentLine = () => {
+    if (!adjMode || !adjProductId) return;
+    const prod = activeProducts.find((p) => p.id === adjProductId);
+    if (!prod) return;
+    const qty = Math.max(1, parseInt(adjQty, 10) || 1);
+    const rawPrice =
+      adjMode === 'Devolución'
+        ? Math.max(0, parseFloat(adjUnitPrice) || 0)
+        : 0;
+    const { precioUnitario, subtotal } = computeTicketItemPricing(
+      qty,
+      rawPrice,
+      adjMode
+    );
+    const newItem: TicketItem = normalizeTicketItem({
+      productoId: prod.id,
+      productoNombre: prod.nombre,
+      cantidad: qty,
+      precioUnitario,
+      subtotal,
+      tipoItem: adjMode,
+      ...(adjMode === 'Devolución' || adjMode === 'Cambio'
+        ? { regresarInventario: adjRegresarInv }
+        : {}),
+      ...(adjMotivo.trim() ? { motivo: adjMotivo.trim() } : {}),
+    });
+    setAdjustmentLines((prev) => [...prev, newItem]);
+    setAdjMode(null);
+    setAdjMotivo('');
+  };
+
+  const removeAdjustmentLine = (index: number) => {
+    setAdjustmentLines((prev) => prev.filter((_, i) => i !== index));
+  };
 
   const estimatedNextFolio = useMemo(
     () => generateNextFolio(dataset.tickets.map((t) => t.folio), 'AST'),
@@ -529,6 +630,24 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
           value: selectedJornada ? selectedJornada.nombre : 'Sin asignar (venta directa)',
         },
         { label: 'Total piezas', value: String(totalPiezas) },
+        ...(ticketTotals.descuentoMonto > 0
+          ? [
+              {
+                label: 'Descuento aplicado',
+                value: `-${formatCurrency(ticketTotals.descuentoMonto)}${
+                  ticketTotals.descuentoMotivo ? ` (${ticketTotals.descuentoMotivo})` : ''
+                }`,
+              },
+            ]
+          : []),
+        ...(ticketTotals.devolucionesMonto > 0
+          ? [
+              {
+                label: 'Devoluciones',
+                value: `-${formatCurrency(ticketTotals.devolucionesMonto)}`,
+              },
+            ]
+          : []),
         { label: 'Total a pagar', value: formatCurrency(totalImporte) },
         {
           label: 'Estado de pago',
@@ -549,6 +668,17 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
             tipoVenta,
             totalPiezas,
             totalImporte,
+            subtotalBruto: ticketTotals.subtotalBruto,
+            ...(ticketTotals.descuentoMonto > 0
+              ? {
+                  descuentoTipo: ticketTotals.descuentoTipo,
+                  descuentoValor: ticketTotals.descuentoValor,
+                  descuentoMonto: ticketTotals.descuentoMonto,
+                  ...(ticketTotals.descuentoMotivo
+                    ? { descuentoMotivo: ticketTotals.descuentoMotivo }
+                    : {}),
+                }
+              : {}),
             jornadaId: selectedJornadaId,
             items: cartItems,
             metodoPago: finalMetodo,
@@ -560,7 +690,10 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
           { deductGeneralInventory: shouldDeductGeneral }
         );
         // Remember ordered products for this client
-        const orderedIds = cartItems.map((it) => it.productoId).filter(Boolean);
+        const orderedIds = cartItems
+          .filter((it) => getTicketItemTipo(it) === 'Venta')
+          .map((it) => it.productoId)
+          .filter(Boolean);
         if (orderedIds.length > 0) {
           const idKey = `id:${activeClient.id}`;
           const nameKey = `name:${normalizeText(activeClient.nombre)}`;
@@ -580,6 +713,11 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
         setLastSavedTicket(saved);
         setCart({});
         setCustomPrices({});
+        setAdjustmentLines([]);
+        setAdjMode(null);
+        setShowDiscountForm(false);
+        setDescuentoValor('');
+        setDescuentoMotivo('');
         setExtraProductIds([]);
         setShowExtraPicker(false);
         setPaymentMode('Pagado');
@@ -801,12 +939,177 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={async () => {
+                const resolved = await resolveLogoDataUrl(logoUrl);
+                const imgEl = document.querySelector<HTMLImageElement>('.quick-receipt-only img');
+                if (imgEl && resolved) imgEl.src = resolved;
+                const html = document.documentElement;
+                html.setAttribute('data-print-mode', 'quick');
+                let cleaned = false;
+                const cleanup = () => {
+                  if (cleaned) return;
+                  cleaned = true;
+                  html.removeAttribute('data-print-mode');
+                };
+                window.addEventListener('afterprint', cleanup, { once: true });
+                setTimeout(() => window.print(), 100);
+                setTimeout(cleanup, 3500);
+              }}
               className="min-h-[42px] inline-flex items-center gap-1.5 rounded-xl border border-emerald-700/30 bg-white px-3.5 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100/50"
             >
               <Printer className="w-4 h-4" />
               <span>Imprimir</span>
             </button>
+            {createPortal(
+              <div className="quick-receipt-only" aria-hidden="true">
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 16,
+                    paddingBottom: 12,
+                    borderBottom: '2px solid #4A2511',
+                    marginBottom: 14,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <img
+                      src={logoUrl || DEFAULT_LOGO_PATH}
+                      alt={BUSINESS_BRANDING.name}
+                      style={{ width: 52, height: 52, objectFit: 'contain', flexShrink: 0 }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: '#1F1A17' }}>
+                        PRODUCTOS ASTORGA
+                      </div>
+                      <div style={{ fontSize: 11, color: '#49403A' }}>
+                        {BUSINESS_BRANDING.location}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#6E6259' }}>
+                        IG: {BUSINESS_BRANDING.instagram} · Cel/WA: {BUSINESS_BRANDING.phone}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div
+                      style={{
+                        fontSize: 15,
+                        fontWeight: 700,
+                        fontFamily: 'monospace',
+                        color: '#4A2511',
+                      }}
+                    >
+                      {synced.folio}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#6E6259' }}>
+                      {formatDateShort(synced.fecha)}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ marginBottom: 12, fontSize: 12 }}>
+                  <div>
+                    <strong>Cliente:</strong> {synced.clienteNombre}
+                  </div>
+                  <div>
+                    <strong>Ruta:</strong> {synced.ruta}
+                  </div>
+                </div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14 }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #D8D1C7', fontSize: 11, color: '#6E6259' }}>
+                      <th style={{ textAlign: 'left', padding: '6px 4px' }}>Producto</th>
+                      <th style={{ textAlign: 'center', padding: '6px 4px' }}>Cant.</th>
+                      <th style={{ textAlign: 'right', padding: '6px 4px' }}>Precio</th>
+                      <th style={{ textAlign: 'right', padding: '6px 4px' }}>Subtotal</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {synced.items.map((it, idx) => {
+                      const tipo = getTicketItemTipo(it);
+                      return (
+                        <tr key={idx} style={{ borderBottom: '1px solid #EFECE6', fontSize: 12 }}>
+                          <td style={{ padding: '6px 4px', fontWeight: 600 }}>
+                            {it.productoNombre}
+                            {tipo !== 'Venta' && (
+                              <span style={{ fontSize: 10, fontWeight: 700, marginLeft: 4 }}>
+                                [{tipo}]
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: '6px 4px', textAlign: 'center' }}>{it.cantidad}</td>
+                          <td style={{ padding: '6px 4px', textAlign: 'right' }}>
+                            {tipo === 'Cortesía' || tipo === 'Cambio'
+                              ? '$0.00'
+                              : formatCurrency(it.precioUnitario)}
+                          </td>
+                          <td style={{ padding: '6px 4px', textAlign: 'right', fontWeight: 700 }}>
+                            {tipo === 'Devolución'
+                              ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                              : formatCurrency(it.subtotal)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {(() => {
+                  const syncedSummary = getTicketSummary(synced);
+                  return (
+                    <>
+                      {(syncedSummary.devolucionesMonto > 0 || syncedSummary.descuentoMonto > 0) && (
+                        <div style={{ fontSize: 11, marginBottom: 6, color: '#49403A' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span>Subtotal:</span>
+                            <span>{formatCurrency(syncedSummary.subtotalBruto)}</span>
+                          </div>
+                          {syncedSummary.devolucionesMonto > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#B91C1C' }}>
+                              <span>Devoluciones:</span>
+                              <span>-{formatCurrency(syncedSummary.devolucionesMonto)}</span>
+                            </div>
+                          )}
+                          {syncedSummary.descuentoMonto > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#047857' }}>
+                              <span>
+                                Descuento
+                                {syncedSummary.descuentoTipo === 'porcentaje' &&
+                                syncedSummary.descuentoValor > 0
+                                  ? ` (${syncedSummary.descuentoValor}%)`
+                                  : ''}
+                                :
+                              </span>
+                              <span>-{formatCurrency(syncedSummary.descuentoMonto)}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          paddingTop: 10,
+                          borderTop: '1.5px solid #4A2511',
+                          marginBottom: 10,
+                        }}
+                      >
+                        <span style={{ fontSize: 12 }}>
+                          Total piezas: <strong>{synced.totalPiezas}</strong>
+                        </span>
+                        <span style={{ fontSize: 18, fontWeight: 700, color: '#4A2511' }}>
+                          TOTAL: {formatCurrency(synced.totalImporte)}
+                        </span>
+                      </div>
+                    </>
+                  );
+                })()}
+                <div style={{ textAlign: 'center', fontSize: 11, color: '#6E6259' }}>
+                  ¡Gracias por su compra en Productos Astorga!
+                </div>
+              </div>,
+              document.body
+            )}
             <button
               type="button"
               onClick={() => setLastSavedTicket(null)}
@@ -1306,37 +1609,40 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
           </div>
 
           {cartItems.length === 0 ? (
-            <div className="py-10 text-center text-sm text-[#6E6259]">
-              Agrega productos desde el listado para armar el ticket.
+            <div className="py-8 text-center text-sm text-[#6E6259]">
+              Agrega productos desde el listado para armar el ticket, o registra una cortesía/devolución abajo.
             </div>
           ) : (
             <div className="divide-y divide-[#EFECE6] max-h-[360px] overflow-y-auto">
-              {cartItems.map((item) => {
-                const prod = dataset.productos.find((p) => p.id === item.productoId);
-                const catalogPrice = prod ? getCatalogPrice(prod) : item.precioUnitario;
+              {(Object.entries(cart) as [string, number][]).map(([prodId, qty]) => {
+                if (qty <= 0) return null;
+                const prod = dataset.productos.find((p) => p.id === prodId);
+                if (!prod) return null;
+                const catalogPrice = getCatalogPrice(prod);
                 const priceInputVal =
-                  customPrices[item.productoId] !== undefined
-                    ? customPrices[item.productoId]
-                    : String(item.precioUnitario);
+                  customPrices[prod.id] !== undefined
+                    ? customPrices[prod.id]
+                    : String(getEffectivePrice(prod));
+                const effectivePrice = getEffectivePrice(prod);
                 const isEdited =
-                  customPrices[item.productoId] !== undefined &&
-                  item.precioUnitario !== catalogPrice;
+                  customPrices[prod.id] !== undefined &&
+                  effectivePrice !== catalogPrice;
                 return (
-                  <div key={item.productoId} className="py-3 flex items-center justify-between gap-3">
+                  <div key={`venta-${prod.id}`} className="py-3 flex items-center justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold text-[#1F1A17] truncate">
-                        {item.productoNombre}
+                        {prod.nombre}
                       </p>
                       <div className="flex flex-wrap items-center gap-1.5 mt-1 text-xs text-[#6E6259] tabular-nums">
-                        <span>{item.cantidad} pza(s) × $</span>
+                        <span>{qty} pza(s) × $</span>
                         <input
                           type="number"
                           step="0.01"
                           min="0"
                           inputMode="decimal"
                           value={priceInputVal}
-                          onChange={(e) => setProductPrice(item.productoId, e.target.value)}
-                          aria-label={`Editar precio en carrito de ${item.productoNombre}`}
+                          onChange={(e) => setProductPrice(prod.id, e.target.value)}
+                          aria-label={`Editar precio en carrito de ${prod.nombre}`}
                           className={`w-20 h-8 rounded-lg border px-2 text-xs font-mono font-bold tabular-nums focus:outline-none focus:border-[var(--theme-primary)] ${
                             isEdited
                               ? 'border-[var(--theme-accent)] bg-[var(--theme-tint)] text-[var(--theme-primary)]'
@@ -1346,9 +1652,9 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
                         {isEdited && (
                           <button
                             type="button"
-                            onClick={() => resetProductPrice(item.productoId)}
+                            onClick={() => resetProductPrice(prod.id)}
                             title="Restaurar precio de catálogo"
-                            aria-label={`Restaurar precio de ${item.productoNombre}`}
+                            aria-label={`Restaurar precio de ${prod.nombre}`}
                             className="p-1 text-[var(--theme-accent)] hover:text-[var(--theme-primary)]"
                           >
                             <RotateCcw className="w-3.5 h-3.5" />
@@ -1358,13 +1664,72 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="text-sm font-bold text-[#1F1A17] tabular-nums">
-                        {formatCurrency(item.subtotal)}
+                        {formatCurrency(roundMoney(qty * effectivePrice))}
                       </span>
                       <button
                         type="button"
-                        onClick={() => setExactQty(item.productoId, '0')}
-                        aria-label={`Quitar ${item.productoNombre}`}
+                        onClick={() => setExactQty(prod.id, '0')}
+                        aria-label={`Quitar ${prod.nombre}`}
                         className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-[#8C7E73] hover:text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {adjustmentLines.map((adj, idx) => {
+                const tipo = getTicketItemTipo(adj);
+                return (
+                  <div
+                    key={`adj-${idx}-${adj.productoId}`}
+                    className="py-3 flex items-center justify-between gap-3 bg-[#FAF8F5]/70 px-2 rounded-lg my-1"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                            tipo === 'Devolución'
+                              ? 'bg-red-50 text-red-700 border border-red-200'
+                              : tipo === 'Cortesía'
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : 'bg-sky-50 text-sky-700 border border-sky-200'
+                          }`}
+                        >
+                          {tipo}
+                        </span>
+                        <p className="text-sm font-semibold text-[#1F1A17] truncate">
+                          {adj.productoNombre}
+                        </p>
+                      </div>
+                      <p className="text-[11px] text-[#6E6259] mt-0.5 tabular-nums">
+                        {adj.cantidad} pza(s)
+                        {tipo === 'Devolución'
+                          ? ` × ${formatCurrency(adj.precioUnitario)} · ${
+                              adj.regresarInventario !== false ? 'Reingresa a stock' : 'Merma/dañado'
+                            }`
+                          : tipo === 'Cambio'
+                          ? ` · ${adj.regresarInventario ? 'Pieza apta' : 'Pieza dañada (sale reemplazo)'}`
+                          : ' · Sin costo'}
+                        {adj.motivo ? ` · ${adj.motivo}` : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`text-sm font-bold tabular-nums ${
+                          tipo === 'Devolución' ? 'text-red-700' : 'text-emerald-700'
+                        }`}
+                      >
+                        {tipo === 'Devolución'
+                          ? `-${formatCurrency(Math.abs(adj.subtotal))}`
+                          : '$0.00'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeAdjustmentLine(idx)}
+                        aria-label={`Quitar ${tipo} de ${adj.productoNombre}`}
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-[#8C7E73] hover:text-red-700 hover:bg-red-50"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -1375,10 +1740,276 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
             </div>
           )}
 
-          <div className="pt-4 border-t border-[#EFECE6] space-y-2">
+          {/* Quick buttons for Cortesia, Devolucion, Cambio & Descuento */}
+          <div className="pt-2 border-t border-[#EFECE6] space-y-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+              <button
+                type="button"
+                onClick={() => openAdjustmentForm('Cortesía')}
+                className={`min-h-[36px] inline-flex items-center justify-center gap-1 rounded-xl border px-2 text-xs font-semibold transition-colors ${
+                  adjMode === 'Cortesía'
+                    ? 'bg-emerald-700 text-white border-emerald-700'
+                    : 'bg-[#FAF8F5] border-[#D8D1C7] text-[#1F1A17] hover:bg-emerald-50'
+                }`}
+              >
+                <Gift className="w-3.5 h-3.5" />
+                <span>Cortesía</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openAdjustmentForm('Devolución')}
+                className={`min-h-[36px] inline-flex items-center justify-center gap-1 rounded-xl border px-2 text-xs font-semibold transition-colors ${
+                  adjMode === 'Devolución'
+                    ? 'bg-red-700 text-white border-red-700'
+                    : 'bg-[#FAF8F5] border-[#D8D1C7] text-[#1F1A17] hover:bg-red-50'
+                }`}
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+                <span>Devolución</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openAdjustmentForm('Cambio')}
+                className={`min-h-[36px] inline-flex items-center justify-center gap-1 rounded-xl border px-2 text-xs font-semibold transition-colors ${
+                  adjMode === 'Cambio'
+                    ? 'bg-sky-700 text-white border-sky-700'
+                    : 'bg-[#FAF8F5] border-[#D8D1C7] text-[#1F1A17] hover:bg-sky-50'
+                }`}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Cambio</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowDiscountForm((v) => !v)}
+                className={`min-h-[36px] inline-flex items-center justify-center gap-1 rounded-xl border px-2 text-xs font-semibold transition-colors ${
+                  showDiscountForm || ticketTotals.descuentoMonto > 0
+                    ? 'bg-[var(--theme-primary)] text-white border-[var(--theme-primary)]'
+                    : 'bg-[#FAF8F5] border-[#D8D1C7] text-[#1F1A17] hover:bg-[var(--theme-tint)]'
+                }`}
+              >
+                <Percent className="w-3.5 h-3.5" />
+                <span>Descuento</span>
+              </button>
+            </div>
+
+            {adjMode && (
+              <div className="rounded-xl border border-[#D8D1C7] bg-[#FAF8F5] p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#1F1A17]">
+                    Agregar {adjMode} al ticket
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAdjMode(null)}
+                    className="text-xs font-semibold text-[#6E6259] hover:text-[#1F1A17]"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#6E6259] mb-1">
+                    Producto
+                  </label>
+                  <select
+                    value={adjProductId}
+                    onChange={(e) => handleSelectAdjProduct(e.target.value)}
+                    className="w-full h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs text-[#1F1A17]"
+                  >
+                    {activeProducts.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.nombre} ({formatCurrency(getCatalogPrice(p))})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[#6E6259] mb-1">
+                      Piezas
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={adjQty}
+                      onChange={(e) => setAdjQty(e.target.value)}
+                      className="w-full h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs font-bold text-[#1F1A17]"
+                    />
+                  </div>
+                  {adjMode === 'Devolución' ? (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#6E6259] mb-1">
+                        Precio bonificado ($)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={adjUnitPrice}
+                        onChange={(e) => setAdjUnitPrice(e.target.value)}
+                        className="w-full h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs font-mono font-bold text-[#1F1A17]"
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#6E6259] mb-1">
+                        Motivo (opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={adjMotivo}
+                        onChange={(e) => setAdjMotivo(e.target.value)}
+                        placeholder={adjMode === 'Cortesía' ? 'Ej. Promoción' : 'Ej. Caducado'}
+                        className="w-full h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs text-[#1F1A17]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {adjMode === 'Devolución' && (
+                  <input
+                    type="text"
+                    value={adjMotivo}
+                    onChange={(e) => setAdjMotivo(e.target.value)}
+                    placeholder="Motivo opcional (ej. Caducado, mal estado...)"
+                    className="w-full h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs text-[#1F1A17]"
+                  />
+                )}
+
+                {(adjMode === 'Devolución' || adjMode === 'Cambio') && (
+                  <label className="flex items-center gap-2 text-xs text-[#49403A] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={adjRegresarInv}
+                      onChange={(e) => setAdjRegresarInv(e.target.checked)}
+                      className="h-4 w-4 accent-[var(--theme-primary)]"
+                    />
+                    <span>
+                      {adjMode === 'Devolución'
+                        ? 'Mercancía en buen estado (reingresar a inventario vendible)'
+                        : 'Pieza recibida en buen estado (no merma)'}
+                    </span>
+                  </label>
+                )}
+
+                <button
+                  type="button"
+                  disabled={!adjProductId}
+                  onClick={handleAddAdjustmentLine}
+                  className="w-full min-h-[38px] rounded-lg bg-[var(--theme-primary)] text-white text-xs font-bold hover:bg-[var(--theme-primary-hover)] disabled:opacity-40"
+                >
+                  Agregar {adjMode}
+                </button>
+              </div>
+            )}
+
+            {showDiscountForm && (
+              <div className="rounded-xl border border-[#D8D1C7] bg-[#FAF8F5] p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#1F1A17]">Descuento en ticket</span>
+                  {ticketTotals.descuentoMonto > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDescuentoValor('');
+                        setDescuentoMotivo('');
+                        setShowDiscountForm(false);
+                      }}
+                      className="text-xs font-semibold text-red-700 hover:underline"
+                    >
+                      Quitar descuento
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 p-0.5 rounded-lg bg-[#EFECE6]">
+                    <button
+                      type="button"
+                      onClick={() => setDescuentoTipo('monto')}
+                      className={`rounded-md text-xs font-bold ${
+                        descuentoTipo === 'monto'
+                          ? 'bg-[var(--theme-primary)] text-white'
+                          : 'text-[#6E6259]'
+                      }`}
+                    >
+                      $
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDescuentoTipo('porcentaje')}
+                      className={`rounded-md text-xs font-bold ${
+                        descuentoTipo === 'porcentaje'
+                          ? 'bg-[var(--theme-primary)] text-white'
+                          : 'text-[#6E6259]'
+                      }`}
+                    >
+                      %
+                    </button>
+                  </div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max={descuentoTipo === 'porcentaje' ? 100 : undefined}
+                    value={descuentoValor}
+                    onChange={(e) => setDescuentoValor(e.target.value)}
+                    placeholder={descuentoTipo === 'porcentaje' ? 'Ej. 10%' : 'Ej. 25.00'}
+                    className="col-span-2 h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs font-mono font-bold text-[#1F1A17]"
+                  />
+                </div>
+                <input
+                  type="text"
+                  value={descuentoMotivo}
+                  onChange={(e) => setDescuentoMotivo(e.target.value)}
+                  placeholder="Motivo del descuento (opcional, ej. Cliente frecuente)"
+                  className="w-full h-9 rounded-lg border border-[#D8D1C7] bg-white px-2.5 text-xs text-[#1F1A17]"
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="pt-4 border-t border-[#EFECE6] space-y-1.5">
+            {(ticketTotals.devolucionesMonto > 0 || ticketTotals.descuentoMonto > 0) && (
+              <>
+                <div className="flex items-center justify-between text-xs text-[#6E6259]">
+                  <span>Subtotal ventas</span>
+                  <span className="font-semibold text-[#1F1A17] tabular-nums">
+                    {formatCurrency(ticketTotals.subtotalBruto)}
+                  </span>
+                </div>
+                {ticketTotals.devolucionesMonto > 0 && (
+                  <div className="flex items-center justify-between text-xs text-red-700">
+                    <span>Devoluciones ({ticketTotals.piezasDevolucion} pzas)</span>
+                    <span className="font-semibold tabular-nums">
+                      -{formatCurrency(ticketTotals.devolucionesMonto)}
+                    </span>
+                  </div>
+                )}
+                {ticketTotals.descuentoMonto > 0 && (
+                  <div className="flex items-center justify-between text-xs text-emerald-700">
+                    <span>
+                      Descuento
+                      {ticketTotals.descuentoTipo === 'porcentaje' &&
+                      ticketTotals.descuentoValor > 0
+                        ? ` (${ticketTotals.descuentoValor}%)`
+                        : ''}
+                    </span>
+                    <span className="font-semibold tabular-nums">
+                      -{formatCurrency(ticketTotals.descuentoMonto)}
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
             <div className="flex items-center justify-between text-sm text-[#6E6259]">
               <span>Total de piezas</span>
-              <span className="font-semibold text-[#1F1A17] tabular-nums">{totalPiezas}</span>
+              <span className="font-semibold text-[#1F1A17] tabular-nums">
+                {totalPiezas}
+                {ticketTotals.piezasCortesia > 0 ? ` (${ticketTotals.piezasCortesia} cort.)` : ''}
+                {ticketTotals.piezasCambio > 0 ? ` (${ticketTotals.piezasCambio} camb.)` : ''}
+              </span>
             </div>
             <div className="flex items-center justify-between text-lg font-bold text-[#1F1A17]">
               <span>Total del ticket</span>

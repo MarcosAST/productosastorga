@@ -1,6 +1,7 @@
 import { BusinessDataset } from '../types/business';
 import { formatMonthLabel } from './formatters';
 import { buildConsolidatedIncomeEntries, getGeneralEgresos } from './incomeConsolidation';
+import { getTicketItemSalesStatsDelta } from './ticketAdjustments';
 
 export type CustomChartType =
   | 'bar'
@@ -297,13 +298,14 @@ export function computeCustomChartData(
     for (const t of dataset.tickets) {
       if (!matchPeriod(t.fecha)) continue;
       for (const it of t.items) {
+        const delta = getTicketItemSalesStatsDelta(it);
         const name = it.productoNombre || 'Producto';
         const val =
           config.metrica === 'monto'
-            ? it.subtotal
+            ? delta.importe
             : config.metrica === 'registros'
             ? 1
-            : it.cantidad;
+            : delta.piezasVendidas;
         addPoint(name, name, val);
       }
     }
@@ -426,7 +428,7 @@ export function computeCustomChartData(
       if (b) b.sue += s.monto;
     });
     for (const [m, d] of monthly.entries()) {
-      const val = config.metrica === 'utilidad' ? d.ing - d.egr - d.sue : d.ing;
+      const val = config.metrica === 'utilidad' ? d.ing - d.egr : d.ing;
       addPoint(m, formatMonthLabel(m).slice(0, 10), val, m);
     }
   }

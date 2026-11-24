@@ -3,6 +3,7 @@ import { CustomChartConfig } from './customCharts';
 import { formatCurrency, formatDateShort } from './formatters';
 import { getTicketPaymentSummary } from './paymentHelpers';
 import { AppTheme, DEFAULT_LOGO_PATH, SurfaceMode } from './themeManager';
+import { getTicketItemTipo, getTicketSummary } from './ticketAdjustments';
 
 export const BUSINESS_BRANDING = {
   name: 'Productos Astorga',
@@ -63,6 +64,7 @@ export function buildGoogleMapsUrl(address: string): string {
 
 export function buildWhatsAppTicketMessage(ticket: Ticket): string {
   const payment = getTicketPaymentSummary(ticket);
+  const summary = getTicketSummary(ticket);
   const lines: string[] = [
     `*${BUSINESS_BRANDING.name}*`,
     BUSINESS_BRANDING.location,
@@ -77,13 +79,40 @@ export function buildWhatsAppTicketMessage(ticket: Ticket): string {
   ];
 
   ticket.items.forEach((it) => {
-    lines.push(
-      `• ${it.cantidad}x ${it.productoNombre} — ${formatCurrency(it.subtotal)}`
-    );
+    const tipo = getTicketItemTipo(it);
+    const tag = tipo !== 'Venta' ? ` [${tipo}]` : '';
+    const motivoStr = it.motivo ? ` (${it.motivo})` : '';
+    const amountStr =
+      tipo === 'Cortesía' || tipo === 'Cambio'
+        ? '$0.00'
+        : tipo === 'Devolución'
+        ? `-${formatCurrency(Math.abs(it.subtotal))}`
+        : formatCurrency(it.subtotal);
+    lines.push(`• ${it.cantidad}x ${it.productoNombre}${tag}${motivoStr} — ${amountStr}`);
   });
 
   lines.push('');
-  lines.push(`*Total:* ${formatCurrency(ticket.totalImporte)} (${ticket.totalPiezas} pzas)`);
+  if (summary.devolucionesMonto > 0 || summary.descuentoMonto > 0) {
+    lines.push(`Subtotal: ${formatCurrency(summary.subtotalBruto)}`);
+    if (summary.devolucionesMonto > 0) {
+      lines.push(`Devoluciones: -${formatCurrency(summary.devolucionesMonto)}`);
+    }
+    if (summary.descuentoMonto > 0) {
+      const descPct =
+        summary.descuentoTipo === 'porcentaje' && summary.descuentoValor > 0
+          ? ` (${summary.descuentoValor}%)`
+          : '';
+      const descMotivo = summary.descuentoMotivo ? ` · ${summary.descuentoMotivo}` : '';
+      lines.push(
+        `Descuento${descPct}${descMotivo}: -${formatCurrency(summary.descuentoMonto)}`
+      );
+    }
+  }
+  lines.push(
+    `*Total:* ${formatCurrency(ticket.totalImporte)} (${ticket.totalPiezas} pzas${
+      summary.piezasCortesia > 0 ? ` · ${summary.piezasCortesia} cortesía` : ''
+    }${summary.piezasCambio > 0 ? ` · ${summary.piezasCambio} cambio` : ''})`
+  );
   lines.push(`Estado de pago: *${payment.estadoPago}* (${payment.metodoPago})`);
   if (payment.saldoPendiente > 0) {
     lines.push(`Abonado: ${formatCurrency(payment.montoPagado)}`);
@@ -103,18 +132,110 @@ export function buildWhatsAppTicketUrl(
   return buildWhatsAppClientUrl(clienteTelefono || '', text);
 }
 
-function loadImageSafe(src: string): Promise<HTMLImageElement | null> {
+const logoDataUrlCache = new Map<string, string>();
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string' && reader.result.startsWith('data:')) {
+        resolve(reader.result);
+      } else {
+        reject(new Error('No se pudo convertir la imagen.'));
+      }
+    };
+    reader.onerror = () => reject(new Error('Error leyendo imagen.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadImageElement(src: string, useCrossOrigin: boolean): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
     if (!src) {
       resolve(null);
       return;
     }
     const img = new Image();
-    img.crossOrigin = 'anonymous';
+    if (useCrossOrigin && !src.startsWith('data:')) {
+      img.crossOrigin = 'anonymous';
+    }
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = src;
   });
+}
+
+async function fetchAsDataUrl(src: string): Promise<string | null> {
+  if (!src) return null;
+  if (src.startsWith('data:')) return src;
+  try {
+    const absoluteUrl = src.startsWith('/')
+      ? `${window.location.origin}${src}`
+      : src;
+    const isSameOrigin = absoluteUrl.startsWith(window.location.origin);
+    const res = await fetch(absoluteUrl, {
+      mode: isSameOrigin ? 'same-origin' : 'cors',
+      cache: 'force-cache',
+    });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) return null;
+    return await blobToDataUrl(blob);
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveLogoDataUrl(logoUrl?: string): Promise<string> {
+  const candidates = Array.from(
+    new Set([logoUrl?.trim() || '', DEFAULT_LOGO_PATH].filter(Boolean))
+  );
+
+  for (const src of candidates) {
+    const cached = logoDataUrlCache.get(src);
+    if (cached) return cached;
+
+    const fetched = await fetchAsDataUrl(src);
+    if (fetched) {
+      logoDataUrlCache.set(src, fetched);
+      return fetched;
+    }
+
+    // Fallback via Image -> Canvas (handles cases where Image works even if fetch fails)
+    const img =
+      (await loadImageElement(src, true)) ||
+      (src.startsWith('/') ? await loadImageElement(src, false) : null);
+    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      try {
+        const tmp = document.createElement('canvas');
+        tmp.width = img.naturalWidth;
+        tmp.height = img.naturalHeight;
+        const tCtx = tmp.getContext('2d');
+        if (tCtx) {
+          tCtx.drawImage(img, 0, 0);
+          const dataUrl = tmp.toDataURL('image/png');
+          if (dataUrl.startsWith('data:')) {
+            logoDataUrlCache.set(src, dataUrl);
+            return dataUrl;
+          }
+        }
+      } catch {
+        // Canvas tainted by cross-origin URL without CORS; continue to fallback candidate
+      }
+    }
+  }
+
+  return DEFAULT_LOGO_PATH;
+}
+
+async function loadImageSafe(src?: string): Promise<HTMLImageElement | null> {
+  const resolved = await resolveLogoDataUrl(src);
+  const img = await loadImageElement(resolved, false);
+  if (img) return img;
+  if (resolved !== DEFAULT_LOGO_PATH) {
+    return await loadImageElement(DEFAULT_LOGO_PATH, false);
+  }
+  return null;
 }
 
 function wrapTextLines(
@@ -143,6 +264,7 @@ export async function renderTicketReceiptBlob(
   logoUrl?: string
 ): Promise<Blob> {
   const payment = getTicketPaymentSummary(ticket);
+  const summary = getTicketSummary(ticket);
   const width = 560;
   const padX = 34;
   const contentW = width - padX * 2;
@@ -152,26 +274,39 @@ export async function renderTicketReceiptBlob(
   const mCtx = measureCanvas.getContext('2d')!;
   mCtx.font = '600 16px system-ui, sans-serif';
 
-  const itemLayouts = ticket.items.map((it) => ({
-    item: it,
-    lines: wrapTextLines(mCtx, `${it.cantidad} × ${it.productoNombre}`, contentW - 130),
-  }));
+  const itemLayouts = ticket.items.map((it) => {
+    const tipo = getTicketItemTipo(it);
+    const label =
+      tipo !== 'Venta'
+        ? `${it.cantidad} × ${it.productoNombre} [${tipo}]`
+        : `${it.cantidad} × ${it.productoNombre}`;
+    return {
+      item: it,
+      tipo,
+      lines: wrapTextLines(mCtx, label, contentW - 135),
+    };
+  });
 
-  const resolvedLogoUrl = logoUrl || DEFAULT_LOGO_PATH;
-  const logoImg = resolvedLogoUrl ? await loadImageSafe(resolvedLogoUrl) : null;
-  const logoHeight = logoImg ? 78 : 0;
+  const logoImg = await loadImageSafe(logoUrl);
+  const headerBlockHeight = 96;
 
   const itemsHeight = itemLayouts.reduce(
     (sum, l) => sum + Math.max(1, l.lines.length) * 22 + 18,
     0
   );
+  const adjustmentsExtraHeight =
+    (summary.devolucionesMonto > 0 || summary.descuentoMonto > 0 ? 26 : 0) +
+    (summary.devolucionesMonto > 0 ? 22 : 0) +
+    (summary.descuentoMonto > 0 ? 22 : 0) +
+    (summary.piezasCortesia > 0 || summary.piezasCambio > 0 ? 18 : 0);
   const paymentExtraHeight = payment.saldoPendiente > 0 ? 54 : 0;
   const totalHeight =
-    60 + // top margin
-    (logoHeight > 0 ? logoHeight + 16 : 0) +
-    198 + // brand (location, IG, WhatsApp) & metadata block
+    46 + // top margin
+    headerBlockHeight + // horizontal logo + brand info
+    140 + // metadata block
     40 + // items header
     Math.max(40, itemsHeight) +
+    adjustmentsExtraHeight +
     130 + // totals & payment box
     paymentExtraHeight +
     70; // footer
@@ -189,33 +324,68 @@ export async function renderTicketReceiptBlob(
   ctx.fillStyle = '#4A2511';
   ctx.fillRect(0, 0, width, 10);
 
-  let y = 36;
+  let y = 32;
+
+  // Header: Logo on the LEFT beside "PRODUCTOS ASTORGA" (centered horizontal lockup)
+  const brandTitle = 'PRODUCTOS ASTORGA';
+  const locLine = BUSINESS_BRANDING.location;
+  const igLine = `Instagram: ${BUSINESS_BRANDING.instagram}`;
+  const phoneLine = `Cel / WhatsApp: ${BUSINESS_BRANDING.phone}`;
+
+  ctx.font = '700 21px system-ui, sans-serif';
+  const titleW = ctx.measureText(brandTitle).width;
+  ctx.font = '600 13px system-ui, sans-serif';
+  const locW = ctx.measureText(locLine).width;
+  ctx.font = '500 12px system-ui, sans-serif';
+  const igW = ctx.measureText(igLine).width;
+  const phoneW = ctx.measureText(phoneLine).width;
+  const textBlockW = Math.max(titleW, locW, igW, phoneW);
 
   if (logoImg) {
-    const scale = Math.min(180 / logoImg.width, 72 / logoImg.height);
-    const dw = logoImg.width * scale;
-    const dh = logoImg.height * scale;
-    ctx.drawImage(logoImg, (width - dw) / 2, y, dw, dh);
-    y += dh + 16;
+    const scale = Math.min(76 / logoImg.width, 76 / logoImg.height);
+    const dw = Math.round(logoImg.width * scale);
+    const dh = Math.round(logoImg.height * scale);
+    const gap = 16;
+    const totalLockupW = dw + gap + textBlockW;
+    const startX = Math.max(padX, Math.round((width - totalLockupW) / 2));
+    const textX = startX + dw + gap;
+    const textBlockH = 74;
+    const lockupH = Math.max(dh, textBlockH);
+    const imgY = y + Math.round((lockupH - dh) / 2);
+
+    ctx.drawImage(logoImg, startX, imgY, dw, dh);
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#1F1A17';
+    ctx.font = '700 21px system-ui, sans-serif';
+    ctx.fillText(brandTitle, textX, y + 20);
+
+    ctx.fillStyle = '#49403A';
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillText(locLine, textX, y + 40);
+
+    ctx.fillStyle = '#6E6259';
+    ctx.font = '500 12px system-ui, sans-serif';
+    ctx.fillText(igLine, textX, y + 57);
+    ctx.fillText(phoneLine, textX, y + 73);
+
+    y += lockupH + 18;
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#1F1A17';
+    ctx.font = '700 22px system-ui, sans-serif';
+    ctx.fillText(brandTitle, width / 2, y + 20);
+
+    ctx.fillStyle = '#49403A';
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillText(locLine, width / 2, y + 40);
+
+    ctx.fillStyle = '#6E6259';
+    ctx.font = '500 12.5px system-ui, sans-serif';
+    ctx.fillText(igLine, width / 2, y + 58);
+    ctx.fillText(phoneLine, width / 2, y + 75);
+    y += 94;
   }
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#1F1A17';
-  ctx.font = '700 22px system-ui, sans-serif';
-  ctx.fillText('PRODUCTOS ASTORGA', width / 2, y);
-  y += 20;
-
-  ctx.fillStyle = '#49403A';
-  ctx.font = '600 13px system-ui, sans-serif';
-  ctx.fillText(BUSINESS_BRANDING.location, width / 2, y);
-  y += 18;
-
-  ctx.fillStyle = '#6E6259';
-  ctx.font = '500 12.5px system-ui, sans-serif';
-  ctx.fillText(`Instagram: ${BUSINESS_BRANDING.instagram}`, width / 2, y);
-  y += 17;
-  ctx.fillText(`Cel / WhatsApp: ${BUSINESS_BRANDING.phone}`, width / 2, y);
-  y += 20;
 
   // Dashed divider
   ctx.strokeStyle = '#D8D1C7';
@@ -273,26 +443,41 @@ export async function renderTicketReceiptBlob(
   y += 18;
 
   for (const layout of itemLayouts) {
+    const isDevolucion = layout.tipo === 'Devolución';
+    const isFree = layout.tipo === 'Cortesía' || layout.tipo === 'Cambio';
+
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#1F1A17';
+    ctx.fillStyle = isDevolucion ? '#B91C1C' : '#1F1A17';
     ctx.font = '600 15px system-ui, sans-serif';
     layout.lines.forEach((line, idx) => {
       ctx.fillText(line, padX, y + idx * 20);
     });
 
     ctx.textAlign = 'right';
+    ctx.fillStyle = isDevolucion ? '#B91C1C' : isFree ? '#047857' : '#1F1A17';
     ctx.font = '700 15px monospace';
-    ctx.fillText(formatCurrency(layout.item.subtotal), width - padX, y);
+    const amountLabel = isFree
+      ? '$0.00'
+      : isDevolucion
+      ? `-${formatCurrency(Math.abs(layout.item.subtotal))}`
+      : formatCurrency(layout.item.subtotal);
+    ctx.fillText(amountLabel, width - padX, y);
 
     const nextY = y + Math.max(1, layout.lines.length) * 20;
     ctx.textAlign = 'left';
     ctx.fillStyle = '#8C7E73';
     ctx.font = '400 12px system-ui, sans-serif';
-    ctx.fillText(
-      `P. unitario: ${formatCurrency(layout.item.precioUnitario)}`,
-      padX,
-      nextY
-    );
+    const subDetail =
+      layout.tipo === 'Cortesía'
+        ? `Cortesía sin costo${layout.item.motivo ? ` · ${layout.item.motivo}` : ''}`
+        : layout.tipo === 'Cambio'
+        ? `Cambio físico sin costo${layout.item.motivo ? ` · ${layout.item.motivo}` : ''}`
+        : isDevolucion
+        ? `Bonificación: ${formatCurrency(layout.item.precioUnitario)} c/u${
+            layout.item.motivo ? ` · ${layout.item.motivo}` : ''
+          }`
+        : `P. unitario: ${formatCurrency(layout.item.precioUnitario)}`;
+    ctx.fillText(subDetail, padX, nextY);
     y = nextY + 18;
   }
 
@@ -304,7 +489,48 @@ export async function renderTicketReceiptBlob(
   ctx.lineTo(width - padX, y);
   ctx.stroke();
   ctx.lineWidth = 1;
-  y += 28;
+  y += 22;
+
+  if (summary.devolucionesMonto > 0 || summary.descuentoMonto > 0) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#6E6259';
+    ctx.font = '500 13px system-ui, sans-serif';
+    ctx.fillText('Subtotal:', padX, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#1F1A17';
+    ctx.font = '600 13px monospace';
+    ctx.fillText(formatCurrency(summary.subtotalBruto), width - padX, y);
+    y += 20;
+
+    if (summary.devolucionesMonto > 0) {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#B91C1C';
+      ctx.font = '500 13px system-ui, sans-serif';
+      ctx.fillText(`Devoluciones (${summary.piezasDevolucion} pzas):`, padX, y);
+      ctx.textAlign = 'right';
+      ctx.font = '600 13px monospace';
+      ctx.fillText(`-${formatCurrency(summary.devolucionesMonto)}`, width - padX, y);
+      y += 20;
+    }
+
+    if (summary.descuentoMonto > 0) {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#047857';
+      ctx.font = '500 13px system-ui, sans-serif';
+      const descLabel =
+        summary.descuentoTipo === 'porcentaje' && summary.descuentoValor > 0
+          ? `Descuento (${summary.descuentoValor}%)${
+              summary.descuentoMotivo ? ` · ${summary.descuentoMotivo}` : ''
+            }:`
+          : `Descuento${summary.descuentoMotivo ? ` (${summary.descuentoMotivo})` : ''}:`;
+      ctx.fillText(descLabel.slice(0, 42), padX, y);
+      ctx.textAlign = 'right';
+      ctx.font = '600 13px monospace';
+      ctx.fillText(`-${formatCurrency(summary.descuentoMonto)}`, width - padX, y);
+      y += 20;
+    }
+    y += 6;
+  }
 
   // Total & pieces
   ctx.textAlign = 'left';
@@ -316,7 +542,20 @@ export async function renderTicketReceiptBlob(
   ctx.fillStyle = '#4A2511';
   ctx.font = '700 24px system-ui, sans-serif';
   ctx.fillText(formatCurrency(ticket.totalImporte), width - padX, y + 2);
-  y += 28;
+  y += 22;
+
+  if (summary.piezasCortesia > 0 || summary.piezasCambio > 0) {
+    const parts: string[] = [];
+    if (summary.piezasCortesia > 0) parts.push(`${summary.piezasCortesia} cortesía`);
+    if (summary.piezasCambio > 0) parts.push(`${summary.piezasCambio} cambio`);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#6E6259';
+    ctx.font = '500 12px system-ui, sans-serif';
+    ctx.fillText(`Incluye: ${parts.join(' · ')}`, padX, y);
+    y += 18;
+  } else {
+    y += 6;
+  }
 
   // Payment status box
   ctx.fillStyle = '#FAF6F0';

@@ -14,10 +14,20 @@ import {
   X,
   Wallet,
   ArrowLeft,
+  AlertTriangle,
+  Clock,
 } from 'lucide-react';
 import { BusinessDataset, Cliente, Ruta, Ticket } from '../types/business';
-import { formatCurrency, formatDateShort, normalizeText } from '../utils/formatters';
+import {
+  ClientInactivityInfo,
+  formatCurrency,
+  formatDateShort,
+  getClientInactivityInfo,
+  getTodayISO,
+  normalizeText,
+} from '../utils/formatters';
 import { computeClienteSaldoPendiente, getTicketPaymentSummary } from '../utils/paymentHelpers';
+import { getTicketItemTipo, getTicketSummary } from '../utils/ticketAdjustments';
 import {
   buildGoogleMapsUrl,
   buildWhatsAppClientUrl,
@@ -38,6 +48,8 @@ interface ClientesHistorialViewProps {
   onDeleteCliente: (cliente: Cliente) => Promise<void>;
   onUpdateRuta: (ruta: Ruta, oldNombre?: string) => Promise<void>;
   onNavigateToAddCliente: () => void;
+  initialOnlyInactive15?: boolean;
+  onConsumeInitialInactiveFilter?: () => void;
 }
 
 export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
@@ -52,11 +64,21 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
   onDeleteCliente,
   onUpdateRuta,
   onNavigateToAddCliente,
+  initialOnlyInactive15 = false,
+  onConsumeInitialInactiveFilter,
 }) => {
   const [selectedRuta, setSelectedRuta] = useState<string>('Todas');
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyWithBalance, setOnlyWithBalance] = useState(false);
+  const [onlyInactive15, setOnlyInactive15] = useState(initialOnlyInactive15);
   const [selectedClienteId, setSelectedClienteId] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (initialOnlyInactive15) {
+      setOnlyInactive15(true);
+      onConsumeInitialInactiveFilter?.();
+    }
+  }, [initialOnlyInactive15, onConsumeInitialInactiveFilter]);
 
   // Edit cliente modal
   const [editingCliente, setEditingCliente] = useState<Cliente | null>(null);
@@ -90,10 +112,19 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
     return ['Todas', ...names];
   }, [dataset.rutas]);
 
+  const todayISO = getTodayISO();
+
   const clientMetrics = useMemo(() => {
     const map = new Map<
       string,
-      { tickets: number; piezas: number; total: number; saldoPendiente: number; pendientes: number }
+      {
+        tickets: number;
+        piezas: number;
+        total: number;
+        saldoPendiente: number;
+        pendientes: number;
+        inactivity: ClientInactivityInfo;
+      }
     >();
     for (const c of dataset.clientes) {
       const clientTickets = dataset.tickets.filter(
@@ -102,16 +133,26 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
           normalizeText(t.clienteNombre) === normalizeText(c.nombre)
       );
       const sal = computeClienteSaldoPendiente(clientTickets, c.id, c.nombre);
+      const inactivity = getClientInactivityInfo(c, clientTickets, todayISO);
       map.set(c.id, {
         tickets: clientTickets.length,
         piezas: clientTickets.reduce((s, t) => s + t.totalPiezas, 0),
         total: clientTickets.reduce((s, t) => s + t.totalImporte, 0),
         saldoPendiente: sal.saldoPendiente,
         pendientes: sal.ticketsPendientes,
+        inactivity,
       });
     }
     return map;
-  }, [dataset.clientes, dataset.tickets]);
+  }, [dataset.clientes, dataset.tickets, todayISO]);
+
+  const inactiveOver15Count = useMemo(() => {
+    let count = 0;
+    for (const m of clientMetrics.values()) {
+      if (m.inactivity.isInactiveOver15Days) count += 1;
+    }
+    return count;
+  }, [clientMetrics]);
 
   const totalPorCobrar = useMemo(() => {
     let total = 0;
@@ -130,6 +171,11 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
         total: 0,
         saldoPendiente: 0,
         pendientes: 0,
+        inactivity: {
+          lastPurchaseDate: null,
+          daysSinceLastPurchase: null,
+          isInactiveOver15Days: false,
+        },
       }
     );
   };
@@ -140,9 +186,12 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
       const matchRoute =
         selectedRuta === 'Todas' || normalizeText(c.ruta) === normalizeText(selectedRuta);
       if (!matchRoute) return false;
-      if (onlyWithBalance) {
-        const metrics = clientMetrics.get(c.id);
-        if (!metrics || metrics.saldoPendiente <= 0) return false;
+      const metrics = clientMetrics.get(c.id);
+      if (onlyWithBalance && (!metrics || metrics.saldoPendiente <= 0)) {
+        return false;
+      }
+      if (onlyInactive15 && !metrics?.inactivity.isInactiveOver15Days) {
+        return false;
       }
       if (!q) return true;
       return (
@@ -151,7 +200,14 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
         normalizeText(c.direccion).includes(q)
       );
     });
-  }, [dataset.clientes, selectedRuta, searchQuery, onlyWithBalance, clientMetrics]);
+  }, [
+    dataset.clientes,
+    selectedRuta,
+    searchQuery,
+    onlyWithBalance,
+    onlyInactive15,
+    clientMetrics,
+  ]);
 
   const activeClientTickets = useMemo(() => {
     if (!selectedCliente) return [];
@@ -343,23 +399,53 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-white border border-[#E7E3DC] px-4 py-2.5">
-          <div className="flex items-center gap-2 text-xs">
-            <Wallet className="w-4 h-4 text-red-700" />
-            <span className="text-[#6E6259]">Total por cobrar en cuentas:</span>
-            <strong className="text-sm font-bold text-red-700 tabular-nums">
-              {formatCurrency(totalPorCobrar)}
-            </strong>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white border border-[#E7E3DC] px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2 text-xs">
+              <Wallet className="w-4 h-4 text-red-700" />
+              <span className="text-[#6E6259]">Total por cobrar en cuentas:</span>
+              <strong className="text-sm font-bold text-red-700 tabular-nums">
+                {formatCurrency(totalPorCobrar)}
+              </strong>
+            </div>
+            {inactiveOver15Count > 0 && (
+              <button
+                type="button"
+                onClick={() => setOnlyInactive15((v) => !v)}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-bold transition-colors ${
+                  onlyInactive15
+                    ? 'bg-amber-700 text-white border-amber-700'
+                    : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>
+                  {inactiveOver15Count} con +15 días sin comprar
+                  {onlyInactive15 ? ' (activo)' : ''}
+                </span>
+              </button>
+            )}
           </div>
-          <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold text-[#1F1A17]">
-            <input
-              type="checkbox"
-              checked={onlyWithBalance}
-              onChange={(e) => setOnlyWithBalance(e.target.checked)}
-              className="h-4 w-4 accent-[var(--theme-primary)]"
-            />
-            <span>Mostrar solo clientes con saldo pendiente</span>
-          </label>
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold text-[#1F1A17]">
+              <input
+                type="checkbox"
+                checked={onlyInactive15}
+                onChange={(e) => setOnlyInactive15(e.target.checked)}
+                className="h-4 w-4 accent-amber-700"
+              />
+              <span>Solo +15 días sin comprar</span>
+            </label>
+            <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold text-[#1F1A17]">
+              <input
+                type="checkbox"
+                checked={onlyWithBalance}
+                onChange={(e) => setOnlyWithBalance(e.target.checked)}
+                className="h-4 w-4 accent-[var(--theme-primary)]"
+              />
+              <span>Solo con saldo pendiente</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -382,6 +468,8 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
               {filteredClientes.map((cliente) => {
                 const metrics = getMetricsForClient(cliente);
                 const isSelected = selectedCliente?.id === cliente.id;
+                const { isInactiveOver15Days, daysSinceLastPurchase, lastPurchaseDate } =
+                  metrics.inactivity;
                 return (
                   <button
                     key={cliente.id}
@@ -395,21 +483,30 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
                     }`}
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
                         <p className="text-sm font-bold text-[#1F1A17] truncate">
                           {cliente.nombre}
                         </p>
-                        {metrics.saldoPendiente > 0 && (
-                          <span className="shrink-0 text-[11px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-md tabular-nums">
-                            Debe {formatCurrency(metrics.saldoPendiente)}
-                          </span>
-                        )}
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                          {isInactiveOver15Days && daysSinceLastPurchase !== null && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-md tabular-nums">
+                              <AlertTriangle className="w-3 h-3 text-amber-700" />
+                              <span>{daysSinceLastPurchase}d sin comprar</span>
+                            </span>
+                          )}
+                          {metrics.saldoPendiente > 0 && (
+                            <span className="text-[11px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-md tabular-nums">
+                              Debe {formatCurrency(metrics.saldoPendiente)}
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <p className="text-xs text-[#6E6259] mt-0.5 truncate">
                         {cliente.ruta} · {metrics.tickets} ticket(s) ·{' '}
                         <span className="font-semibold text-[var(--theme-primary)] tabular-nums">
                           {formatCurrency(metrics.total)}
                         </span>
+                        {lastPurchaseDate ? ` · Última: ${formatDateShort(lastPurchaseDate)}` : ''}
                       </p>
                     </div>
                     <ChevronRight className="w-4 h-4 text-[#9E9187] shrink-0" />
@@ -446,6 +543,27 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
               <div className="pb-4 border-b border-[#EFECE6] flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h2 className="text-xl font-bold text-[#1F1A17]">{selectedCliente.nombre}</h2>
+                  {metrics.inactivity.isInactiveOver15Days &&
+                    metrics.inactivity.daysSinceLastPurchase !== null && (
+                      <div className="mt-2 inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-950">
+                        <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                        <span>
+                          Lleva <strong>{metrics.inactivity.daysSinceLastPurchase} días</strong> sin comprar
+                          {metrics.inactivity.lastPurchaseDate
+                            ? ` (último pedido: ${formatDateShort(metrics.inactivity.lastPurchaseDate)})`
+                            : ''}
+                        </span>
+                      </div>
+                    )}
+                  {!metrics.inactivity.isInactiveOver15Days &&
+                    metrics.inactivity.lastPurchaseDate && (
+                      <p className="mt-1 inline-flex items-center gap-1 text-xs text-[#6E6259]">
+                        <Clock className="w-3.5 h-3.5 text-[#8C7E73]" />
+                        <span>
+                          Última compra: {formatDateShort(metrics.inactivity.lastPurchaseDate)}
+                        </span>
+                      </p>
+                    )}
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#6E6259]">
                     <span className="inline-flex items-center gap-1">
                       <MapPin className="w-3.5 h-3.5 text-[var(--theme-accent)]" />
@@ -632,23 +750,67 @@ export const ClientesHistorialView: React.FC<ClientesHistorialViewProps> = ({
                           </div>
                         </div>
 
-                        {ticket.items.length > 0 ? (
-                          <div className="text-xs text-[#49403A] space-y-1 pt-1">
-                            {ticket.items.map((it, idx) => (
-                              <div
-                                key={idx}
-                                className="flex items-center justify-between gap-2 tabular-nums"
-                              >
-                                <span>
-                                  {it.cantidad} × {it.productoNombre}
-                                </span>
-                                <span className="text-[#6E6259]">
-                                  {formatCurrency(it.subtotal)}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
+                        {ticket.items.length > 0 ? (() => {
+                          const summary = getTicketSummary(ticket);
+                          return (
+                            <div className="text-xs text-[#49403A] space-y-1 pt-1">
+                              {ticket.items.map((it, idx) => {
+                                const tipo = getTicketItemTipo(it);
+                                return (
+                                  <div
+                                    key={idx}
+                                    className="flex items-center justify-between gap-2 tabular-nums"
+                                  >
+                                    <span className="flex items-center gap-1.5 flex-wrap">
+                                      <span>
+                                        {it.cantidad} × {it.productoNombre}
+                                      </span>
+                                      {tipo !== 'Venta' && (
+                                        <span
+                                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                            tipo === 'Devolución'
+                                              ? 'bg-red-50 text-red-700'
+                                              : tipo === 'Cortesía'
+                                              ? 'bg-emerald-50 text-emerald-700'
+                                              : 'bg-sky-50 text-sky-700'
+                                          }`}
+                                        >
+                                          {tipo}
+                                        </span>
+                                      )}
+                                    </span>
+                                    <span
+                                      className={
+                                        tipo === 'Devolución'
+                                          ? 'text-red-700 font-semibold'
+                                          : tipo === 'Cortesía' || tipo === 'Cambio'
+                                          ? 'text-emerald-700 font-semibold'
+                                          : 'text-[#6E6259]'
+                                      }
+                                    >
+                                      {tipo === 'Devolución'
+                                        ? `-${formatCurrency(Math.abs(it.subtotal))}`
+                                        : formatCurrency(it.subtotal)}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                              {summary.descuentoMonto > 0 && (
+                                <div className="flex items-center justify-between gap-2 text-emerald-700 font-semibold">
+                                  <span>
+                                    Descuento
+                                    {summary.descuentoTipo === 'porcentaje' &&
+                                    summary.descuentoValor > 0
+                                      ? ` (${summary.descuentoValor}%)`
+                                      : ''}
+                                    {summary.descuentoMotivo ? ` · ${summary.descuentoMotivo}` : ''}
+                                  </span>
+                                  <span>-{formatCurrency(summary.descuentoMonto)}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })() : (
                           <p className="text-xs text-[#6E6259]">{ticket.detalleTexto}</p>
                         )}
                       </div>

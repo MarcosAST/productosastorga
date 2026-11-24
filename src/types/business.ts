@@ -41,12 +41,18 @@ export interface Cliente {
   rowNumber?: number;
 }
 
+export type TicketItemTipo = 'Venta' | 'Cortesía' | 'Devolución' | 'Cambio';
+export type DescuentoTipo = 'monto' | 'porcentaje';
+
 export interface TicketItem {
   productoId: string;
   productoNombre: string;
   cantidad: number;
   precioUnitario: number;
   subtotal: number;
+  tipoItem?: TicketItemTipo;
+  regresarInventario?: boolean;
+  motivo?: string;
 }
 
 export interface Ticket {
@@ -58,6 +64,11 @@ export interface Ticket {
   tipoVenta: TipoVenta;
   totalPiezas: number;
   totalImporte: number;
+  subtotalBruto?: number;
+  descuentoTipo?: DescuentoTipo;
+  descuentoValor?: number;
+  descuentoMonto?: number;
+  descuentoMotivo?: string;
   jornadaId: string;
   detalleTexto: string;
   items: TicketItem[];
@@ -127,6 +138,8 @@ export type MovimientoInventarioTipo =
   | 'Ajuste manual'
   | 'Merma'
   | 'Cortesía'
+  | 'Devolución cliente'
+  | 'Cambio cliente'
   | 'Venta directa'
   | 'Carga jornada'
   | 'Devolución jornada'

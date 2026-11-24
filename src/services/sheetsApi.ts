@@ -3,6 +3,7 @@ import {
   Cliente,
   ConceptoGasto,
   ConceptoIngreso,
+  DescuentoTipo,
   DriveSpreadsheetFile,
   Egreso,
   EstadoPago,
@@ -23,6 +24,7 @@ import {
   Ticket,
   TicketAbono,
   TicketItem,
+  TicketItemTipo,
   TipoVenta,
 } from '../types/business';
 import {
@@ -34,6 +36,11 @@ import {
   parseNumericValue,
 } from '../utils/formatters';
 import { getTicketPaymentSummary } from '../utils/paymentHelpers';
+import {
+  buildTicketDetalleTexto,
+  computeTicketTotals,
+  getTicketItemTipo,
+} from '../utils/ticketAdjustments';
 
 export class AuthExpiredError extends Error {
   constructor(message = 'Tu sesión de Google expiró. Vuelve a iniciar sesión para continuar.') {
@@ -88,6 +95,11 @@ export const TAB_HEADERS: Record<LogicalTabKey, string[]> = {
     'Monto Pagado',
     'Saldo Pendiente',
     'Abonos JSON',
+    'Subtotal Bruto',
+    'Descuento Tipo',
+    'Descuento Valor',
+    'Descuento Monto',
+    'Descuento Motivo',
   ],
   jornadas: [
     'ID',
@@ -368,7 +380,16 @@ const TAB_COLORS: Record<string, { red: number; green: number; blue: number }> =
 
 const CURRENCY_HEADER_NORMS: Partial<Record<LogicalTabKey, string[]>> = {
   productos: ['preciomayoreo', 'mayoreo', 'preciomenudeo', 'menudeo', 'precio'],
-  tickets: ['totalimporte', 'importe', 'total', 'monto', 'montopagado', 'saldopendiente'],
+  tickets: [
+    'totalimporte',
+    'importe',
+    'total',
+    'monto',
+    'montopagado',
+    'saldopendiente',
+    'subtotalbruto',
+    'descuentomonto',
+  ],
   jornadas: ['totalimporte', 'importe', 'total'],
   otrosIngresos: ['monto', 'importe', 'total', 'ingreso'],
   conceptosIngreso: ['montosugerido', 'monto', 'importe'],
@@ -510,9 +531,9 @@ function buildDynamicResumenRows(
     ['Ingresos por otros conceptos', `=SUM(${tabRef('otrosIngresos', otrIngMontoCol)})`, `Suma en ${mapping.otrosIngresos || DEFAULT_TAB_NAMES.otrosIngresos}`],
     ['Ingresos totales acumulados', '=B8+B9+B10', 'Jornadas + tickets directos + otros ingresos'],
     ['Egresos y gastos generales', `=SUMIF(${tabRef('egresos', egrJornadaCol)},"",${tabRef('egresos', egrMontoCol)})`, `Gastos generales en ${mapping.egresos || DEFAULT_TAB_NAMES.egresos}`],
-    ['Sueldos totales pagados', `=SUM(${tabRef('sueldos', sueMontoCol)})`, `Suma en ${mapping.sueldos || DEFAULT_TAB_NAMES.sueldos}`],
-    ['Utilidad preliminar (Ingresos - Egresos)', '=B11-B12', 'Antes de sueldos'],
-    ['Utilidad neta acumulada', '=B11-B12-B13', 'Ingresos menos egresos y sueldos'],
+    ['Sueldos totales (registro separado)', `=SUM(${tabRef('sueldos', sueMontoCol)})`, `Salen de utilidad · Pestaña ${mapping.sueldos || DEFAULT_TAB_NAMES.sueldos}`],
+    ['Utilidad neta (Ingresos - Egresos)', '=B11-B12', 'Solo resta egresos (sueldos separados)'],
+    ['Utilidad neta acumulada', '=B11-B12', 'Ingresos menos egresos operativos'],
     ['Jornadas registradas', `=COUNTA(${tabRef('jornadas', jorIdCol)})`, `Pestaña ${mapping.jornadas || DEFAULT_TAB_NAMES.jornadas}`],
     ['Conceptos de gasto guardados', `=COUNTA(${tabRef('conceptosGasto', conIdCol)})`, `Pestaña ${mapping.conceptosGasto || DEFAULT_TAB_NAMES.conceptosGasto}`],
     ['DESGLOSE POR TIPO DE VENTA', 'Tickets', 'Importe Total'],
@@ -899,6 +920,7 @@ export async function createAstorgaSpreadsheet(
         range: `${quoteSheetName(DEFAULT_TAB_NAMES.tickets)}!A2`,
         values: seedDataset.tickets.map((t) => {
           const pay = getTicketPaymentSummary(t);
+          const totals = computeTicketTotals(t.items || [], t);
           return [
             t.folio,
             asLiteralText(t.fecha),
@@ -916,6 +938,11 @@ export async function createAstorgaSpreadsheet(
             pay.montoPagado,
             pay.saldoPendiente,
             JSON.stringify(pay.abonos || []),
+            totals.subtotalBruto,
+            totals.descuentoMonto > 0 ? totals.descuentoTipo : '',
+            totals.descuentoMonto > 0 ? totals.descuentoValor : 0,
+            totals.descuentoMonto,
+            totals.descuentoMotivo,
           ];
         }),
       });
@@ -1547,6 +1574,11 @@ function getFieldAliases(key: LogicalTabKey, standardHeader: string): string[] {
       montopagado: ['Monto Pagado', 'Pagado', 'Abonado'],
       saldopendiente: ['Saldo Pendiente', 'Saldo', 'Pendiente', 'Por Cobrar'],
       abonosjson: ['Abonos JSON', 'Abonos', 'Pagos JSON'],
+      subtotalbruto: ['Subtotal Bruto', 'Subtotal', 'Importe Bruto'],
+      descuentotipo: ['Descuento Tipo', 'Tipo Descuento'],
+      descuentovalor: ['Descuento Valor', 'Valor Descuento'],
+      descuentomonto: ['Descuento Monto', 'Descuento', 'Monto Descuento'],
+      descuentomotivo: ['Descuento Motivo', 'Motivo Descuento', 'Nota Descuento'],
     },
     jornadas: {
       id: ['ID', 'Jornada ID', 'JornadaID'],
@@ -1639,36 +1671,69 @@ function parseItemsField(jsonStr: string, textStr: string): TicketItem[] {
     try {
       const parsed = JSON.parse(jsonStr);
       if (Array.isArray(parsed)) {
-        return parsed.map((it: any) => ({
-          productoId: String(it.productoId || it.id || ''),
-          productoNombre: String(it.productoNombre || it.nombre || ''),
-          cantidad: parseNumericValue(it.cantidad),
-          precioUnitario: parseNumericValue(it.precioUnitario),
-          subtotal: parseNumericValue(it.subtotal),
-        }));
+        return parsed.map((it: any) => {
+          const subtotal = parseNumericValue(it.subtotal);
+          const rawTipo = String(it.tipoItem || '').trim();
+          const tipoItem: TicketItemTipo | undefined =
+            rawTipo === 'Cortesía' ||
+            rawTipo === 'Devolución' ||
+            rawTipo === 'Cambio' ||
+            rawTipo === 'Venta'
+              ? rawTipo
+              : subtotal < 0
+              ? 'Devolución'
+              : undefined;
+          const item: TicketItem = {
+            productoId: String(it.productoId || it.id || ''),
+            productoNombre: String(it.productoNombre || it.nombre || ''),
+            cantidad: parseNumericValue(it.cantidad),
+            precioUnitario: parseNumericValue(it.precioUnitario),
+            subtotal,
+          };
+          if (tipoItem && tipoItem !== 'Venta') {
+            item.tipoItem = tipoItem;
+          }
+          if (it.regresarInventario !== undefined) {
+            item.regresarInventario = Boolean(it.regresarInventario);
+          }
+          if (it.motivo) {
+            item.motivo = String(it.motivo);
+          }
+          return item;
+        });
       }
     } catch {
       // Fallback to text parsing below
     }
   }
   if (!textStr) return [];
-  return textStr
+  const mainText = textStr.split('|')[0] || textStr;
+  return mainText
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part, i) => {
-      const m = part.match(/^(\d+(?:\.\d+)?)\s*x\s*(.+?)(?:\s*\(\$?([\d,.]+)\))?$/i);
+      const m = part.match(
+        /^(\d+(?:\.\d+)?)\s*x\s*(.+?)(?:\s*\[(Cortesía|Devolución|Cambio)[^\]]*\])?(?:\s*\((-?\$?[\d,.]+)\))?$/i
+      );
       if (m) {
         const cantidad = parseNumericValue(m[1]);
         const productoNombre = m[2].trim();
-        const subtotal = m[3] ? parseNumericValue(m[3]) : 0;
-        const precioUnitario = cantidad > 0 ? subtotal / cantidad : 0;
+        const tag = m[3];
+        const subtotal = m[4] ? parseNumericValue(m[4]) : 0;
+        const tipoItem: TicketItemTipo | undefined = tag
+          ? (tag.charAt(0).toUpperCase() + tag.slice(1).toLowerCase() as TicketItemTipo)
+          : subtotal < 0
+          ? 'Devolución'
+          : undefined;
+        const precioUnitario = cantidad > 0 ? Math.abs(subtotal) / cantidad : 0;
         return {
           productoId: `parsed-${i}`,
           productoNombre,
           cantidad,
           precioUnitario,
           subtotal,
+          ...(tipoItem && tipoItem !== 'Venta' ? { tipoItem } : {}),
         };
       }
       return {
@@ -1892,6 +1957,55 @@ export async function loadAllBusinessData(
 
         const abonos = parseJsonArrayField<TicketAbono>(abonosJson);
 
+        const subtotalBrutoRaw = getCell(
+          row,
+          headerIdx,
+          getFieldAliases('tickets', 'Subtotal Bruto'),
+          firstRowHasHeaders ? -1 : 16
+        );
+        const descuentoTipoRaw = getCell(
+          row,
+          headerIdx,
+          getFieldAliases('tickets', 'Descuento Tipo'),
+          firstRowHasHeaders ? -1 : 17
+        );
+        const descuentoValorRaw = getCell(
+          row,
+          headerIdx,
+          getFieldAliases('tickets', 'Descuento Valor'),
+          firstRowHasHeaders ? -1 : 18
+        );
+        const descuentoMontoRaw = getCell(
+          row,
+          headerIdx,
+          getFieldAliases('tickets', 'Descuento Monto'),
+          firstRowHasHeaders ? -1 : 19
+        );
+        const descuentoMotivo = getCell(
+          row,
+          headerIdx,
+          getFieldAliases('tickets', 'Descuento Motivo'),
+          firstRowHasHeaders ? -1 : 20
+        );
+
+        const descuentoMonto =
+          descuentoMontoRaw !== '' ? Math.max(0, parseNumericValue(descuentoMontoRaw)) : 0;
+        const descuentoTipo: DescuentoTipo | undefined = descuentoTipoRaw
+          ? normalizeText(descuentoTipoRaw).includes('porc') || descuentoTipoRaw.includes('%')
+            ? 'porcentaje'
+            : 'monto'
+          : descuentoMonto > 0
+          ? 'monto'
+          : undefined;
+        const descuentoValor =
+          descuentoValorRaw !== ''
+            ? Math.max(0, parseNumericValue(descuentoValorRaw))
+            : descuentoMonto > 0
+            ? descuentoMonto
+            : undefined;
+        const subtotalBruto =
+          subtotalBrutoRaw !== '' ? Math.max(0, parseNumericValue(subtotalBrutoRaw)) : undefined;
+
         dataset.tickets.push({
           folio,
           fecha:
@@ -1905,6 +2019,15 @@ export async function loadAllBusinessData(
             getCell(row, headerIdx, ['Total Piezas', 'Piezas', 'Cantidad'], 6)
           ),
           totalImporte,
+          ...(subtotalBruto !== undefined ? { subtotalBruto } : {}),
+          ...(descuentoTipo && descuentoMonto > 0
+            ? {
+                descuentoTipo,
+                descuentoValor,
+                descuentoMonto,
+                ...(descuentoMotivo ? { descuentoMotivo } : {}),
+              }
+            : {}),
           jornadaId: getCell(row, headerIdx, ['Jornada ID', 'JornadaID', 'Jornada'], 8),
           detalleTexto,
           items,
@@ -2601,11 +2724,14 @@ export async function appendTicketSafe(
     folio = generateNextFolio(existingFolios, 'AST');
   }
 
-  const detalleTexto = draft.items
-    .map((it) => `${it.cantidad}x ${it.productoNombre} ($${it.subtotal.toFixed(2)})`)
-    .join(', ');
+  const totals = computeTicketTotals(draft.items, draft);
+  const detalleTexto = buildTicketDetalleTexto(draft.items, draft);
   const pay = getTicketPaymentSummary({
     ...draft,
+    totalPiezas: totals.totalPiezas,
+    totalImporte: totals.totalImporte,
+    subtotalBruto: totals.subtotalBruto,
+    descuentoMonto: totals.descuentoMonto,
     folio,
     detalleTexto,
   });
@@ -2636,12 +2762,12 @@ export async function appendTicketSafe(
     {
       standardHeader: 'Total Piezas',
       aliases: getFieldAliases('tickets', 'Total Piezas'),
-      value: draft.totalPiezas,
+      value: totals.totalPiezas,
     },
     {
       standardHeader: 'Total Importe',
       aliases: getFieldAliases('tickets', 'Total Importe'),
-      value: draft.totalImporte,
+      value: totals.totalImporte,
     },
     {
       standardHeader: 'Jornada ID',
@@ -2683,11 +2809,52 @@ export async function appendTicketSafe(
       aliases: getFieldAliases('tickets', 'Abonos JSON'),
       value: JSON.stringify(pay.abonos),
     },
+    {
+      standardHeader: 'Subtotal Bruto',
+      aliases: getFieldAliases('tickets', 'Subtotal Bruto'),
+      value: totals.subtotalBruto,
+    },
+    {
+      standardHeader: 'Descuento Tipo',
+      aliases: getFieldAliases('tickets', 'Descuento Tipo'),
+      value: totals.descuentoMonto > 0 ? totals.descuentoTipo : '',
+    },
+    {
+      standardHeader: 'Descuento Valor',
+      aliases: getFieldAliases('tickets', 'Descuento Valor'),
+      value: totals.descuentoMonto > 0 ? totals.descuentoValor : 0,
+    },
+    {
+      standardHeader: 'Descuento Monto',
+      aliases: getFieldAliases('tickets', 'Descuento Monto'),
+      value: totals.descuentoMonto,
+    },
+    {
+      standardHeader: 'Descuento Motivo',
+      aliases: getFieldAliases('tickets', 'Descuento Motivo'),
+      value: totals.descuentoMotivo,
+    },
   ]);
 
   return {
     ...draft,
     folio,
+    totalPiezas: totals.totalPiezas,
+    totalImporte: totals.totalImporte,
+    subtotalBruto: totals.subtotalBruto,
+    ...(totals.descuentoMonto > 0
+      ? {
+          descuentoTipo: totals.descuentoTipo,
+          descuentoValor: totals.descuentoValor,
+          descuentoMonto: totals.descuentoMonto,
+          ...(totals.descuentoMotivo ? { descuentoMotivo: totals.descuentoMotivo } : {}),
+        }
+      : {
+          descuentoTipo: undefined,
+          descuentoValor: undefined,
+          descuentoMonto: undefined,
+          descuentoMotivo: undefined,
+        }),
     detalleTexto,
     metodoPago: pay.metodoPago,
     estadoPago: pay.estadoPago,
@@ -2707,15 +2874,23 @@ export async function updateTicketRow(
     throw new Error('No se encontró la fila del ticket en Google Sheets.');
   }
 
-  const totalPiezas = ticket.items.reduce((sum, it) => sum + it.cantidad, 0);
-  const totalImporte = ticket.items.reduce((sum, it) => sum + it.subtotal, 0);
-  const detalleTexto = ticket.items
-    .map((it) => `${it.cantidad}x ${it.productoNombre} ($${it.subtotal.toFixed(2)})`)
-    .join(', ');
+  const hasItems = (ticket.items || []).length > 0;
+  const totals = hasItems
+    ? computeTicketTotals(ticket.items, ticket)
+    : computeTicketTotals([], ticket);
+  const totalPiezas = hasItems ? totals.totalPiezas : ticket.totalPiezas;
+  const totalImporte = hasItems ? totals.totalImporte : ticket.totalImporte;
+  const subtotalBruto = hasItems ? totals.subtotalBruto : ticket.subtotalBruto ?? ticket.totalImporte;
+  const descuentoMonto = hasItems ? totals.descuentoMonto : ticket.descuentoMonto ?? 0;
+  const detalleTexto = hasItems
+    ? buildTicketDetalleTexto(ticket.items, ticket)
+    : ticket.detalleTexto;
   const pay = getTicketPaymentSummary({
     ...ticket,
     totalPiezas,
     totalImporte,
+    subtotalBruto,
+    descuentoMonto,
     detalleTexto,
   });
 
@@ -2792,12 +2967,51 @@ export async function updateTicketRow(
       aliases: getFieldAliases('tickets', 'Abonos JSON'),
       value: JSON.stringify(pay.abonos),
     },
+    {
+      standardHeader: 'Subtotal Bruto',
+      aliases: getFieldAliases('tickets', 'Subtotal Bruto'),
+      value: subtotalBruto,
+    },
+    {
+      standardHeader: 'Descuento Tipo',
+      aliases: getFieldAliases('tickets', 'Descuento Tipo'),
+      value: descuentoMonto > 0 ? ticket.descuentoTipo || totals.descuentoTipo : '',
+    },
+    {
+      standardHeader: 'Descuento Valor',
+      aliases: getFieldAliases('tickets', 'Descuento Valor'),
+      value: descuentoMonto > 0 ? ticket.descuentoValor ?? descuentoMonto : 0,
+    },
+    {
+      standardHeader: 'Descuento Monto',
+      aliases: getFieldAliases('tickets', 'Descuento Monto'),
+      value: descuentoMonto,
+    },
+    {
+      standardHeader: 'Descuento Motivo',
+      aliases: getFieldAliases('tickets', 'Descuento Motivo'),
+      value: descuentoMonto > 0 ? ticket.descuentoMotivo || '' : '',
+    },
   ]);
 
   return {
     ...ticket,
     totalPiezas,
     totalImporte,
+    subtotalBruto,
+    ...(descuentoMonto > 0
+      ? {
+          descuentoTipo: ticket.descuentoTipo || totals.descuentoTipo,
+          descuentoValor: ticket.descuentoValor ?? descuentoMonto,
+          descuentoMonto,
+          ...(ticket.descuentoMotivo ? { descuentoMotivo: ticket.descuentoMotivo } : {}),
+        }
+      : {
+          descuentoTipo: undefined,
+          descuentoValor: undefined,
+          descuentoMonto: undefined,
+          descuentoMotivo: undefined,
+        }),
     detalleTexto,
     metodoPago: pay.metodoPago,
     estadoPago: pay.estadoPago,
