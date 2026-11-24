@@ -1,0 +1,320 @@
+@import "tailwindcss";
+
+:root {
+  --theme-primary: #4A2511;
+  --theme-primary-hover: #3A1C0C;
+  --theme-primary-ink: #4A2511;
+  --theme-accent: #D98218;
+  --theme-bg: #F8F7F4;
+  --theme-tint: #FAF6F0;
+  --surface-card: #FFFFFF;
+  --surface-subtle: #FAF8F5;
+  --surface-muted: #EFECE6;
+  --surface-border: #E7E3DC;
+  --surface-border-strong: #D8D1C7;
+  --ink-primary: #1F1A17;
+  --ink-secondary: #49403A;
+  --ink-muted: #6E6259;
+  --ink-subtle: #8C7E73;
+}
+
+@theme {
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+    background-color: var(--theme-bg);
+    color: var(--ink-primary);
+  }
+
+  body {
+    background-color: var(--theme-bg);
+    color: var(--ink-primary);
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* =========================================================
+   Surface Appearance Modes: Claro / Oscuro / Nítido
+   ========================================================= */
+
+/* MODO OSCURO */
+html[data-surface-mode="oscuro"] {
+  color-scheme: dark;
+  --surface-card: #1C1917;
+  --surface-subtle: #24201D;
+  --surface-muted: #2E2925;
+  --surface-border: #36302B;
+  --surface-border-strong: #4A423B;
+  --ink-primary: #F5F2EE;
+  --ink-secondary: #DDD6CE;
+  --ink-muted: #B0A69D;
+  --ink-subtle: #8C8279;
+}
+
+html[data-surface-mode="oscuro"] body {
+  background-color: var(--theme-bg);
+  color: var(--ink-primary);
+}
+
+html[data-surface-mode="oscuro"] .bg-white,
+html[data-surface-mode="oscuro"] .bg-white\/95 {
+  background-color: var(--surface-card) !important;
+}
+
+html[data-surface-mode="oscuro"] .bg-\[\#FAF8F5\],
+html[data-surface-mode="oscuro"] .bg-\[\#FFFCF7\],
+html[data-surface-mode="oscuro"] .bg-\[\#F8F7F4\] {
+  background-color: var(--surface-subtle) !important;
+}
+
+html[data-surface-mode="oscuro"] .bg-\[\#EFECE6\],
+html[data-surface-mode="oscuro"] .bg-\[\#F5F2EC\],
+html[data-surface-mode="oscuro"] .bg-\[\#F3EFE8\],
+html[data-surface-mode="oscuro"] .bg-\[\#FAF6F0\] {
+  background-color: var(--surface-muted) !important;
+}
+
+html[data-surface-mode="oscuro"] .hover\:bg-\[\#FAF8F5\]:hover,
+html[data-surface-mode="oscuro"] .hover\:bg-\[\#F5F2EC\]:hover,
+html[data-surface-mode="oscuro"] .hover\:bg-\[\#FAF6F0\]:hover {
+  background-color: var(--surface-muted) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-\[\#1F1A17\] {
+  color: var(--ink-primary) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-\[\#49403A\] {
+  color: var(--ink-secondary) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-\[\#6E6259\] {
+  color: var(--ink-muted) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-\[\#8C7E73\],
+html[data-surface-mode="oscuro"] .text-\[\#7A6E65\],
+html[data-surface-mode="oscuro"] .text-\[\#9E9187\] {
+  color: var(--ink-subtle) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-\[\#4A2511\] {
+  color: var(--theme-primary-ink) !important;
+}
+
+html[data-surface-mode="oscuro"] .border-\[\#E7E3DC\],
+html[data-surface-mode="oscuro"] .border-\[\#EFECE6\],
+html[data-surface-mode="oscuro"] .border-\[\#F4F1EB\] {
+  border-color: var(--surface-border) !important;
+}
+
+html[data-surface-mode="oscuro"] .border-\[\#D8D1C7\] {
+  border-color: var(--surface-border-strong) !important;
+}
+
+html[data-surface-mode="oscuro"] .divide-\[\#EFECE6\] > :not(:last-child),
+html[data-surface-mode="oscuro"] .divide-\[\#E7E3DC\] > :not(:last-child) {
+  border-color: var(--surface-border) !important;
+}
+
+html[data-surface-mode="oscuro"] input:not([type="color"]):not([type="checkbox"]):not([type="radio"]),
+html[data-surface-mode="oscuro"] select,
+html[data-surface-mode="oscuro"] textarea {
+  background-color: var(--surface-subtle) !important;
+  color: var(--ink-primary) !important;
+  border-color: var(--surface-border-strong) !important;
+}
+
+html[data-surface-mode="oscuro"] .bg-emerald-50 {
+  background-color: rgba(16, 185, 129, 0.14) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-emerald-950,
+html[data-surface-mode="oscuro"] .text-emerald-900,
+html[data-surface-mode="oscuro"] .text-emerald-800 {
+  color: #A7F3D0 !important;
+}
+
+html[data-surface-mode="oscuro"] .text-emerald-700 {
+  color: #34D399 !important;
+}
+
+html[data-surface-mode="oscuro"] .bg-red-50 {
+  background-color: rgba(239, 68, 68, 0.14) !important;
+}
+
+html[data-surface-mode="oscuro"] .text-red-900,
+html[data-surface-mode="oscuro"] .text-red-800,
+html[data-surface-mode="oscuro"] .text-red-700,
+html[data-surface-mode="oscuro"] .text-\[\#B91C1C\] {
+  color: #FCA5A5 !important;
+}
+
+/* MODO NÍTIDO (Alto contraste / lectura exterior ultra clara) */
+html[data-surface-mode="nitido"] {
+  --surface-card: #FFFFFF;
+  --surface-subtle: #F4F4F5;
+  --surface-muted: #E4E4E7;
+  --surface-border: #A1A1AA;
+  --surface-border-strong: #27272A;
+  --ink-primary: #09090B;
+  --ink-secondary: #18181B;
+  --ink-muted: #3F3F46;
+  --ink-subtle: #52525B;
+}
+
+html[data-surface-mode="nitido"] .bg-white,
+html[data-surface-mode="nitido"] .bg-white\/95 {
+  background-color: #FFFFFF !important;
+}
+
+html[data-surface-mode="nitido"] .bg-\[\#FAF8F5\],
+html[data-surface-mode="nitido"] .bg-\[\#FFFCF7\],
+html[data-surface-mode="nitido"] .bg-\[\#F8F7F4\] {
+  background-color: #F4F4F5 !important;
+}
+
+html[data-surface-mode="nitido"] .text-\[\#1F1A17\],
+html[data-surface-mode="nitido"] .text-\[\#49403A\] {
+  color: #09090B !important;
+}
+
+html[data-surface-mode="nitido"] .text-\[\#6E6259\],
+html[data-surface-mode="nitido"] .text-\[\#8C7E73\],
+html[data-surface-mode="nitido"] .text-\[\#7A6E65\],
+html[data-surface-mode="nitido"] .text-\[\#9E9187\] {
+  color: #3F3F46 !important;
+}
+
+html[data-surface-mode="nitido"] .border-\[\#E7E3DC\],
+html[data-surface-mode="nitido"] .border-\[\#D8D1C7\],
+html[data-surface-mode="nitido"] .border-\[\#EFECE6\] {
+  border-color: #27272A !important;
+}
+
+html[data-surface-mode="nitido"] .divide-\[\#EFECE6\] > :not(:last-child),
+html[data-surface-mode="nitido"] .divide-\[\#E7E3DC\] > :not(:last-child) {
+  border-color: #D4D4D8 !important;
+}
+
+/* Official Google Sign-In button styling */
+.gsi-material-button {
+  -moz-user-select: none;
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  -webkit-appearance: none;
+  background-color: #ffffff;
+  background-image: none;
+  border: 1px solid #d5cfc7;
+  border-radius: 10px;
+  box-sizing: border-box;
+  color: #1f1a17;
+  cursor: pointer;
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  height: 44px;
+  letter-spacing: 0.15px;
+  outline: none;
+  overflow: hidden;
+  padding: 0 18px;
+  position: relative;
+  text-align: center;
+  transition: background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
+  vertical-align: middle;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gsi-material-button:hover:not(:disabled) {
+  background-color: #faf8f5;
+  border-color: #4a2511;
+  box-shadow: 0 1px 3px rgba(74, 37, 17, 0.12);
+}
+
+.gsi-material-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.gsi-material-button-content-wrapper {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  height: 100%;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+  gap: 10px;
+}
+
+.gsi-material-button-icon {
+  height: 20px;
+  width: 20px;
+  min-width: 20px;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* =========================================================
+   Print & Thermal Receipt (58mm / 80mm) Styles
+   ========================================================= */
+.thermal-receipt-only {
+  display: none;
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  html[data-print-mode="thermal"] body > #root {
+    display: none !important;
+  }
+
+  html[data-print-mode="thermal"] .thermal-receipt-only {
+    display: block !important;
+    position: static !important;
+    width: 54mm !important;
+    max-width: 54mm !important;
+    margin: 0 auto !important;
+    padding: 2mm 1mm !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-family: "JetBrains Mono", ui-monospace, monospace !important;
+    font-size: 10px !important;
+    line-height: 1.3 !important;
+  }
+}
+
+@page {
+  margin: 4mm;
+}
+

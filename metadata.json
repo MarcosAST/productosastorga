@@ -1,0 +1,6 @@
+{
+  "name": "Productos Astorga",
+  "description": "Sistema instalable de gestión de pedidos, rutas, clientes, catálogo, ingresos, egresos y finanzas para Productos Astorga conectado a Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
