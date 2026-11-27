@@ -232,6 +232,7 @@ export default function App() {
 
   const [activeModule, setActiveModule] = useState<AppModule>('inicio');
   const [preselectedJornadaId, setPreselectedJornadaId] = useState<string>('');
+  const [preselectedClienteId, setPreselectedClienteId] = useState<string>('');
   const [clientesInitialInactiveFilter, setClientesInitialInactiveFilter] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -2001,6 +2002,7 @@ export default function App() {
                   fecha: jornada.fecha,
                   ruta: jornada.ruta,
                   nombre: jornada.nombre,
+                  ...(jornada.fondoRuta !== undefined ? { fondoRuta: jornada.fondoRuta } : {}),
                   ticketFolios: jornada.ticketFolios,
                   totalTickets: jornada.totalTickets,
                   totalPiezas: jornada.totalPiezas,
@@ -2128,6 +2130,7 @@ export default function App() {
                   fecha: jornada.fecha,
                   ruta: jornada.ruta,
                   nombre: jornada.nombre,
+                  ...(jornada.fondoRuta !== undefined ? { fondoRuta: jornada.fondoRuta } : {}),
                   ticketFolios: jornada.ticketFolios,
                   totalTickets: jornada.totalTickets,
                   totalPiezas: jornada.totalPiezas,
@@ -3880,7 +3883,11 @@ export default function App() {
               ticketsTabName={tabMapping.tickets || DEFAULT_TAB_NAMES.tickets}
               rutasTabName={tabMapping.rutas || DEFAULT_TAB_NAMES.rutas}
               preselectedJornadaId={preselectedJornadaId}
-              onClearPreselectedJornada={() => setPreselectedJornadaId('')}
+              preselectedClienteId={preselectedClienteId}
+              onClearPreselectedJornada={() => {
+                setPreselectedJornadaId('');
+                setPreselectedClienteId('');
+              }}
               onRequestMutation={setPendingMutation}
               onCreateRuta={handleCreateRuta}
               onSaveTicket={handleSaveTicket}
@@ -3908,8 +3915,9 @@ export default function App() {
               onSaveEgreso={handleSaveEgreso}
               onUpdateEgreso={handleUpdateEgreso}
               onDeleteEgreso={handleDeleteEgreso}
-              onCreateTicketInJornada={(j) => {
+              onCreateTicketInJornada={(j, clienteId) => {
                 setPreselectedJornadaId(j.id);
+                setPreselectedClienteId(clienteId || '');
                 setActiveModule('nuevo-pedido');
               }}
             />

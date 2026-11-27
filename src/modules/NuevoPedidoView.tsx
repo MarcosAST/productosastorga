@@ -90,6 +90,7 @@ interface NuevoPedidoViewProps {
   ticketsTabName: string;
   rutasTabName: string;
   preselectedJornadaId?: string;
+  preselectedClienteId?: string;
   onClearPreselectedJornada?: () => void;
   onRequestMutation: (mutation: PendingMutation) => void;
   onCreateRuta: (nombre: string, descripcion: string) => Promise<void>;
@@ -109,6 +110,7 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
   ticketsTabName,
   rutasTabName,
   preselectedJornadaId,
+  preselectedClienteId,
   onClearPreselectedJornada,
   onRequestMutation,
   onCreateRuta,
@@ -171,12 +173,14 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
       setSelectedJornadaId(j.id);
       if (j.ruta) {
         setSelectedRuta(j.ruta);
-        setSelectedClienteId('');
+        setSelectedClienteId(preselectedClienteId || '');
+      } else if (preselectedClienteId) {
+        setSelectedClienteId(preselectedClienteId);
       }
       if (j.fecha) setFecha(j.fecha);
     }
     onClearPreselectedJornada?.();
-  }, [preselectedJornadaId, dataset.jornadas, onClearPreselectedJornada]);
+  }, [preselectedJornadaId, preselectedClienteId, dataset.jornadas, onClearPreselectedJornada]);
 
   // Inline create route state
   const [showNewRouteForm, setShowNewRouteForm] = useState(false);
@@ -977,11 +981,17 @@ export const NuevoPedidoView: React.FC<NuevoPedidoViewProps> = ({
                     <img
                       src={logoUrl || DEFAULT_LOGO_PATH}
                       alt={BUSINESS_BRANDING.name}
-                      style={{ width: 52, height: 52, objectFit: 'contain', flexShrink: 0 }}
+                      style={{
+                        width: 96,
+                        height: 68,
+                        objectFit: 'contain',
+                        flexShrink: 0,
+                        imageRendering: 'auto',
+                      }}
                     />
                     <div>
-                      <div style={{ fontSize: 16, fontWeight: 700, color: '#1F1A17' }}>
-                        PRODUCTOS ASTORGA
+                      <div style={{ fontSize: 13.5, fontWeight: 700, color: '#1F1A17' }}>
+                        Productos Astorga
                       </div>
                       <div style={{ fontSize: 11, color: '#49403A' }}>
                         {BUSINESS_BRANDING.location}

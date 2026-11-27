@@ -603,10 +603,16 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
           <img
             src={effectiveLogo}
             alt="Productos Astorga"
-            style={{ width: 30, height: 30, objectFit: 'contain', flexShrink: 0 }}
+            style={{
+              width: 78,
+              height: 56,
+              objectFit: 'contain',
+              flexShrink: 0,
+              imageRendering: 'auto',
+            }}
           />
-          <div style={{ fontWeight: 700, fontSize: 12, lineHeight: 1.15, textAlign: 'left' }}>
-            PRODUCTOS ASTORGA
+          <div style={{ fontWeight: 700, fontSize: 9.5, lineHeight: 1.15, textAlign: 'left' }}>
+            Productos Astorga
           </div>
         </div>
         <div style={{ textAlign: 'center', fontSize: 10 }}>{BUSINESS_BRANDING.location}</div>
@@ -733,11 +739,17 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
           <img
             src={effectiveLogo}
             alt={BUSINESS_BRANDING.name}
-            style={{ width: 52, height: 52, objectFit: 'contain', flexShrink: 0 }}
+            style={{
+              width: 96,
+              height: 68,
+              objectFit: 'contain',
+              flexShrink: 0,
+              imageRendering: 'auto',
+            }}
           />
           <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#1F1A17' }}>
-              PRODUCTOS ASTORGA
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: '#1F1A17' }}>
+              Productos Astorga
             </div>
             <div style={{ fontSize: 11, color: '#49403A' }}>{BUSINESS_BRANDING.location}</div>
             <div style={{ fontSize: 11, color: '#6E6259' }}>

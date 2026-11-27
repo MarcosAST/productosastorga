@@ -115,6 +115,7 @@ export const TAB_HEADERS: Record<LogicalTabKey, string[]> = {
     'Inventario JSON',
     'Visitas JSON',
     'Conciliacion JSON',
+    'Fondo Ruta',
   ],
   movimientosInventario: [
     'ID',
@@ -390,7 +391,7 @@ const CURRENCY_HEADER_NORMS: Partial<Record<LogicalTabKey, string[]>> = {
     'subtotalbruto',
     'descuentomonto',
   ],
-  jornadas: ['totalimporte', 'importe', 'total'],
+  jornadas: ['fondoruta', 'totalimporte', 'importe', 'total'],
   otrosIngresos: ['monto', 'importe', 'total', 'ingreso'],
   conceptosIngreso: ['montosugerido', 'monto', 'importe'],
   egresos: ['monto', 'importe', 'total', 'costo', 'gasto'],
@@ -964,6 +965,7 @@ export async function createAstorgaSpreadsheet(
           JSON.stringify(j.inventario || []),
           JSON.stringify(j.visitas || []),
           JSON.stringify(j.conciliacion || []),
+          j.fondoRuta ?? 0,
         ]),
       });
     }
@@ -1594,6 +1596,7 @@ function getFieldAliases(key: LogicalTabKey, standardHeader: string): string[] {
       inventariojson: ['Inventario JSON', 'Inventario', 'Productos Jornada', 'Carga JSON'],
       visitasjson: ['Visitas JSON', 'Visitas', 'Checklist Ruta'],
       conciliacionjson: ['Conciliacion JSON', 'Conciliación JSON', 'Conciliacion', 'Mermas JSON'],
+      fondoruta: ['Fondo Ruta', 'Fondo de Ruta', 'Fondo Inicial', 'Fondo', 'Caja Ruta'],
     },
     movimientosInventario: {
       id: ['ID', 'Movimiento ID'],
@@ -2075,6 +2078,14 @@ export async function loadAllBusinessData(
           getFieldAliases('jornadas', 'Conciliacion JSON'),
           firstRowHasHeaders ? -1 : 12
         );
+        const fondoRutaRaw = getCell(
+          row,
+          headerIdx,
+          getFieldAliases('jornadas', 'Fondo Ruta'),
+          firstRowHasHeaders ? -1 : 13
+        );
+        const fondoRuta =
+          fondoRutaRaw !== '' ? Math.max(0, parseNumericValue(fondoRutaRaw)) : 0;
         const visitas = parseJsonArrayField<JornadaVisitaItem>(visitasJson);
         const conciliacion = parseJsonArrayField<JornadaConciliacionItem>(conciliacionJson);
         dataset.jornadas.push({
@@ -2082,6 +2093,7 @@ export async function loadAllBusinessData(
           fecha: normalizeSheetDate(getCell(row, headerIdx, ['Fecha'], 1)),
           ruta: getCell(row, headerIdx, ['Ruta'], 2),
           nombre: getCell(row, headerIdx, ['Nombre Jornada', 'Nombre', 'Jornada'], 3),
+          ...(fondoRuta > 0 ? { fondoRuta } : {}),
           ticketFolios,
           totalTickets: parseNumericValue(
             getCell(row, headerIdx, ['Total Tickets', 'Tickets Count', 'Cantidad Tickets'], 5)
@@ -3134,6 +3146,11 @@ export async function appendJornadaAndAssignTickets(
       aliases: getFieldAliases('jornadas', 'Conciliacion JSON'),
       value: JSON.stringify(jornadaDraft.conciliacion || []),
     },
+    {
+      standardHeader: 'Fondo Ruta',
+      aliases: getFieldAliases('jornadas', 'Fondo Ruta'),
+      value: jornadaDraft.fondoRuta ?? 0,
+    },
   ]);
 
   if (selectedTickets.length > 0) {
@@ -3213,6 +3230,11 @@ export async function updateJornadaRow(
       standardHeader: 'Conciliacion JSON',
       aliases: getFieldAliases('jornadas', 'Conciliacion JSON'),
       value: JSON.stringify(jornada.conciliacion || []),
+    },
+    {
+      standardHeader: 'Fondo Ruta',
+      aliases: getFieldAliases('jornadas', 'Fondo Ruta'),
+      value: jornada.fondoRuta ?? 0,
     },
   ]);
 }

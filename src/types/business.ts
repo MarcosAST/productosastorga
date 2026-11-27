@@ -120,6 +120,7 @@ export interface Jornada {
   fecha: string;
   ruta: string;
   nombre: string;
+  fondoRuta?: number;
   ticketFolios: string[];
   totalTickets: number;
   totalPiezas: number;

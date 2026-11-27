@@ -259,12 +259,61 @@ function wrapTextLines(
   return lines;
 }
 
+function drawCrispImage(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  x: number,
+  y: number,
+  dw: number,
+  dh: number,
+  dpr = 2
+): void {
+  const targetW = Math.max(1, Math.round(dw * dpr));
+  const targetH = Math.max(1, Math.round(dh * dpr));
+  let curW = img.naturalWidth || img.width;
+  let curH = img.naturalHeight || img.height;
+
+  if (curW <= targetW * 2 && curH <= targetH * 2) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, x, y, dw, dh);
+    ctx.restore();
+    return;
+  }
+
+  // Multi-step halving avoids browser single-pass aliasing when scaling large 3000px+ logos down
+  let source: CanvasImageSource = img;
+  while (curW * 0.5 > targetW && curH * 0.5 > targetH) {
+    const nextW = Math.max(targetW, Math.round(curW * 0.5));
+    const nextH = Math.max(targetH, Math.round(curH * 0.5));
+    const stepCanvas = document.createElement('canvas');
+    stepCanvas.width = nextW;
+    stepCanvas.height = nextH;
+    const stepCtx = stepCanvas.getContext('2d');
+    if (!stepCtx) break;
+    stepCtx.imageSmoothingEnabled = true;
+    stepCtx.imageSmoothingQuality = 'high';
+    stepCtx.drawImage(source, 0, 0, nextW, nextH);
+    source = stepCanvas;
+    curW = nextW;
+    curH = nextH;
+  }
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source, x, y, dw, dh);
+  ctx.restore();
+}
+
 export async function renderTicketReceiptBlob(
   ticket: Ticket,
   logoUrl?: string
 ): Promise<Blob> {
   const payment = getTicketPaymentSummary(ticket);
   const summary = getTicketSummary(ticket);
+  const dpr = 2;
   const width = 560;
   const padX = 34;
   const contentW = width - padX * 2;
@@ -288,7 +337,7 @@ export async function renderTicketReceiptBlob(
   });
 
   const logoImg = await loadImageSafe(logoUrl);
-  const headerBlockHeight = 96;
+  const headerBlockHeight = logoImg ? 136 : 94;
 
   const itemsHeight = itemLayouts.reduce(
     (sum, l) => sum + Math.max(1, l.lines.length) * 22 + 18,
@@ -312,9 +361,12 @@ export async function renderTicketReceiptBlob(
     70; // footer
 
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = totalHeight;
+  canvas.width = width * dpr;
+  canvas.height = totalHeight * dpr;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(dpr, dpr);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   // Clean paper background
   ctx.fillStyle = '#FFFFFF';
@@ -324,67 +376,68 @@ export async function renderTicketReceiptBlob(
   ctx.fillStyle = '#4A2511';
   ctx.fillRect(0, 0, width, 10);
 
-  let y = 32;
+  let y = 30;
 
-  // Header: Logo on the LEFT beside "PRODUCTOS ASTORGA" (centered horizontal lockup)
-  const brandTitle = 'PRODUCTOS ASTORGA';
+  // Header: Noticeable crisp Logo on the LEFT beside compact "Productos Astorga"
+  const brandTitle = BUSINESS_BRANDING.name;
   const locLine = BUSINESS_BRANDING.location;
   const igLine = `Instagram: ${BUSINESS_BRANDING.instagram}`;
   const phoneLine = `Cel / WhatsApp: ${BUSINESS_BRANDING.phone}`;
 
-  ctx.font = '700 21px system-ui, sans-serif';
+  ctx.font = '700 15px system-ui, sans-serif';
   const titleW = ctx.measureText(brandTitle).width;
-  ctx.font = '600 13px system-ui, sans-serif';
+  ctx.font = '600 12px system-ui, sans-serif';
   const locW = ctx.measureText(locLine).width;
-  ctx.font = '500 12px system-ui, sans-serif';
+  ctx.font = '500 11.5px system-ui, sans-serif';
   const igW = ctx.measureText(igLine).width;
   const phoneW = ctx.measureText(phoneLine).width;
   const textBlockW = Math.max(titleW, locW, igW, phoneW);
 
   if (logoImg) {
-    const scale = Math.min(76 / logoImg.width, 76 / logoImg.height);
+    const scale = Math.min(164 / logoImg.width, 114 / logoImg.height);
     const dw = Math.round(logoImg.width * scale);
     const dh = Math.round(logoImg.height * scale);
     const gap = 16;
     const totalLockupW = dw + gap + textBlockW;
     const startX = Math.max(padX, Math.round((width - totalLockupW) / 2));
     const textX = startX + dw + gap;
-    const textBlockH = 74;
+    const textBlockH = 68;
     const lockupH = Math.max(dh, textBlockH);
     const imgY = y + Math.round((lockupH - dh) / 2);
+    const textStartY = y + Math.round((lockupH - textBlockH) / 2);
 
-    ctx.drawImage(logoImg, startX, imgY, dw, dh);
+    drawCrispImage(ctx, logoImg, startX, imgY, dw, dh, dpr);
 
     ctx.textAlign = 'left';
     ctx.fillStyle = '#1F1A17';
-    ctx.font = '700 21px system-ui, sans-serif';
-    ctx.fillText(brandTitle, textX, y + 20);
+    ctx.font = '700 15px system-ui, sans-serif';
+    ctx.fillText(brandTitle, textX, textStartY + 15);
 
     ctx.fillStyle = '#49403A';
-    ctx.font = '600 13px system-ui, sans-serif';
-    ctx.fillText(locLine, textX, y + 40);
+    ctx.font = '600 12px system-ui, sans-serif';
+    ctx.fillText(locLine, textX, textStartY + 33);
 
     ctx.fillStyle = '#6E6259';
-    ctx.font = '500 12px system-ui, sans-serif';
-    ctx.fillText(igLine, textX, y + 57);
-    ctx.fillText(phoneLine, textX, y + 73);
+    ctx.font = '500 11.5px system-ui, sans-serif';
+    ctx.fillText(igLine, textX, textStartY + 49);
+    ctx.fillText(phoneLine, textX, textStartY + 65);
 
     y += lockupH + 18;
   } else {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#1F1A17';
-    ctx.font = '700 22px system-ui, sans-serif';
-    ctx.fillText(brandTitle, width / 2, y + 20);
+    ctx.font = '700 17px system-ui, sans-serif';
+    ctx.fillText(brandTitle, width / 2, y + 18);
 
     ctx.fillStyle = '#49403A';
-    ctx.font = '600 13px system-ui, sans-serif';
-    ctx.fillText(locLine, width / 2, y + 40);
+    ctx.font = '600 12px system-ui, sans-serif';
+    ctx.fillText(locLine, width / 2, y + 36);
 
     ctx.fillStyle = '#6E6259';
-    ctx.font = '500 12.5px system-ui, sans-serif';
-    ctx.fillText(igLine, width / 2, y + 58);
-    ctx.fillText(phoneLine, width / 2, y + 75);
-    y += 94;
+    ctx.font = '500 11.5px system-ui, sans-serif';
+    ctx.fillText(igLine, width / 2, y + 53);
+    ctx.fillText(phoneLine, width / 2, y + 69);
+    y += 92;
   }
 
   // Dashed divider

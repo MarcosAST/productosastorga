@@ -245,7 +245,7 @@ export async function processLogoImageFile(file: File): Promise<string> {
       const img = new Image();
       img.onerror = () => reject(new Error('El archivo no es una imagen válida.'));
       img.onload = () => {
-        const maxSize = 512;
+        const maxSize = 1024;
         const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
         const w = Math.max(1, Math.round(img.width * scale));
         const h = Math.max(1, Math.round(img.height * scale));
@@ -257,6 +257,8 @@ export async function processLogoImageFile(file: File): Promise<string> {
           reject(new Error('No se pudo procesar la imagen.'));
           return;
         }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, w, h);
         resolve(canvas.toDataURL('image/png'));
       };

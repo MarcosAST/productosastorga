@@ -86,7 +86,7 @@ interface JornadasViewProps {
   ) => Promise<void>;
   onUpdateEgreso?: (egreso: Egreso) => Promise<void>;
   onDeleteEgreso?: (egreso: Egreso) => Promise<void>;
-  onCreateTicketInJornada: (jornada: Jornada) => void;
+  onCreateTicketInJornada: (jornada: Jornada, clienteId?: string) => void;
 }
 
 export const JornadasView: React.FC<JornadasViewProps> = ({
@@ -135,9 +135,14 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
   const [fecha, setFecha] = useState(getTodayISO());
   const [ruta, setRuta] = useState(dataset.rutas[0]?.nombre || '');
   const [nombre, setNombre] = useState('');
+  const [fondoRuta, setFondoRuta] = useState('');
   const [notas, setNotas] = useState('');
   const [prodSearch, setProdSearch] = useState('');
   const [loadQuantities, setLoadQuantities] = useState<Record<string, number>>({});
+
+  // Inline Edit Fondo de Ruta on selected jornada
+  const [editingFondoJornadaId, setEditingFondoJornadaId] = useState<string | null>(null);
+  const [editFondoValue, setEditFondoValue] = useState('');
 
   // Edit Open Jornada Inventory Modal
   const [editingInvJornada, setEditingInvJornada] = useState<Jornada | null>(null);
@@ -154,6 +159,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
   const [visitDrafts, setVisitDrafts] = useState<
     Record<string, { estado?: 'Pendiente' | 'Visitado'; notas?: string }>
   >({});
+  const [showVisitedWithoutOrder, setShowVisitedWithoutOrder] = useState(false);
 
   // Attach unassigned tickets panel
   const [showAttachTickets, setShowAttachTickets] = useState(false);
@@ -280,14 +286,24 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
   const selectedCobranza = useMemo(() => {
     let vendido = 0;
     let cobrado = 0;
+    let cobradoEfectivo = 0;
     let porCobrar = 0;
     for (const t of selectedJornadaTickets) {
       const pay = getTicketPaymentSummary(t);
       vendido += t.totalImporte;
       cobrado += pay.montoPagado;
       porCobrar += pay.saldoPendiente;
+      if (t.abonos && t.abonos.length > 0) {
+        for (const ab of t.abonos) {
+          if (ab.metodoPago === 'Efectivo') {
+            cobradoEfectivo += ab.monto;
+          }
+        }
+      } else if (pay.metodoPago === 'Efectivo') {
+        cobradoEfectivo += pay.montoPagado;
+      }
     }
-    return { vendido, cobrado, porCobrar };
+    return { vendido, cobrado, cobradoEfectivo, porCobrar };
   }, [selectedJornadaTickets]);
 
   const { egresos: selectedJornadaEgresos, totalGastos: selectedTotalGastos } = useMemo(
@@ -295,7 +311,10 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
     [dataset, selectedJornada?.id]
   );
 
+  const selectedFondoRuta = selectedJornada?.fondoRuta || 0;
   const selectedTotalNetoJornada = selectedCobranza.vendido - selectedTotalGastos;
+  const selectedEfectivoEsperado =
+    selectedFondoRuta + selectedCobranza.cobradoEfectivo - selectedTotalGastos;
 
   // Route visit checklist rows for selected jornada
   const selectedVisitRows = useMemo(() => {
@@ -336,6 +355,27 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
       };
     });
   }, [selectedJornada, dataset.clientes, selectedJornadaTickets, visitDrafts]);
+
+  const pendingVisitRows = useMemo(
+    () => selectedVisitRows.filter((r) => r.estado === 'Pendiente'),
+    [selectedVisitRows]
+  );
+
+  const visitedVisitRows = useMemo(
+    () => selectedVisitRows.filter((r) => r.estado !== 'Pendiente'),
+    [selectedVisitRows]
+  );
+
+  const visitedWithoutOrderRows = useMemo(
+    () => selectedVisitRows.filter((r) => !r.hasOrder && r.estado === 'Visitado'),
+    [selectedVisitRows]
+  );
+
+  const hasUnsavedVisitDrafts = useMemo(() => {
+    if (!selectedJornada) return false;
+    const prefix = `${selectedJornada.id}::`;
+    return Object.keys(visitDrafts).some((k) => k.startsWith(prefix));
+  }, [selectedJornada, visitDrafts]);
 
   // Create form filtered products
   const filteredCreateProducts = useMemo(() => {
@@ -391,6 +431,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
     }
 
     const totalLoaded = inventarioItems.reduce((s, it) => s + it.cantidadInicial, 0);
+    const fondoNum = Math.max(0, Math.round((parseFloat(fondoRuta) || 0) * 100) / 100);
 
     onRequestMutation({
       title: 'Abrir nueva jornada con inventario',
@@ -405,6 +446,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
         { label: 'Nombre de jornada', value: finalName },
         { label: 'Fecha', value: formatDateShort(fecha) },
         { label: 'Ruta', value: rutaLabel },
+        { label: 'Fondo de ruta', value: formatCurrency(fondoNum) },
         { label: 'Productos cargados', value: `${inventarioItems.length} artículo(s)` },
         { label: 'Total piezas salidas', value: `${formatNumber(totalLoaded)} piezas` },
       ],
@@ -415,6 +457,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
             fecha,
             ruta: rutaLabel,
             nombre: finalName,
+            ...(fondoNum > 0 ? { fondoRuta: fondoNum } : {}),
             ticketFolios: [],
             totalTickets: 0,
             totalPiezas: 0,
@@ -427,10 +470,36 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
           deltas
         );
         setNombre('');
+        setFondoRuta('');
         setNotas('');
         setLoadQuantities({});
         setProdSearch('');
         setMode('detalle');
+      },
+    });
+  };
+
+  const handleSaveEditedFondoRuta = (j: Jornada) => {
+    const nextFondo = Math.max(0, Math.round((parseFloat(editFondoValue) || 0) * 100) / 100);
+    onRequestMutation({
+      title: 'Actualizar fondo de ruta',
+      description: `Se actualizará el dinero inicial (fondo de ruta) de "${j.nombre}".`,
+      sheetTab: jornadasTabName,
+      details: [
+        { label: 'Jornada', value: j.nombre },
+        { label: 'Fondo anterior', value: formatCurrency(j.fondoRuta || 0) },
+        { label: 'Nuevo fondo de ruta', value: formatCurrency(nextFondo) },
+      ],
+      confirmLabel: 'Guardar fondo',
+      onConfirm: async () => {
+        await onUpdateJornada(
+          {
+            ...j,
+            fondoRuta: nextFondo,
+          },
+          []
+        );
+        setEditingFondoJornadaId(null);
       },
     });
   };
@@ -559,6 +628,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
       ],
       confirmLabel: 'Guardar visitas',
       onConfirm: async () => {
+        const targetId = selectedJornada.id;
         await onUpdateJornada(
           {
             ...selectedJornada,
@@ -566,6 +636,14 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
           },
           []
         );
+        setVisitDrafts((prev) => {
+          const next = { ...prev };
+          const prefix = `${targetId}::`;
+          Object.keys(next).forEach((k) => {
+            if (k.startsWith(prefix)) delete next[k];
+          });
+          return next;
+        });
       },
     });
   };
@@ -948,6 +1026,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                       </div>
                       <p className="text-xs text-[#6E6259] mt-0.5 tabular-nums">
                         {formatDateShort(j.fecha)} · {j.ruta}
+                        {(j.fondoRuta || 0) > 0 && ` · Fondo: ${formatCurrency(j.fondoRuta || 0)}`}
                       </p>
                       <p className="text-xs font-semibold text-[var(--theme-primary)] mt-1 tabular-nums">
                         {tickets.length} tickets · {formatCurrency(neto)}
@@ -1000,6 +1079,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                       </div>
                       <p className="text-[11px] text-[#6E6259] mt-0.5 tabular-nums">
                         {formatDateShort(j.fecha)} · {j.ruta} · {j.totalTickets} tickets
+                        {(j.fondoRuta || 0) > 0 ? ` · Fondo ${formatCurrency(j.fondoRuta || 0)}` : ''}
                         {totalGastos > 0 ? ` · Gastos -${formatCurrency(totalGastos)}` : ''}
                       </p>
                     </button>
@@ -1075,6 +1155,21 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                     />
                   </div>
                   <div>
+                    <label className="block text-xs font-semibold text-[#6E6259] mb-1">
+                      Fondo de ruta ($)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      inputMode="decimal"
+                      value={fondoRuta}
+                      onChange={(e) => setFondoRuta(e.target.value)}
+                      placeholder="0.00 (dinero inicial en efectivo)"
+                      className="w-full h-11 rounded-xl border border-[#D8D1C7] px-3 text-sm font-mono font-semibold text-[#1F1A17]"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
                     <label className="block text-xs font-semibold text-[#6E6259] mb-1">
                       Notas (opcional)
                     </label>
@@ -1343,7 +1438,57 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
 
                 {/* Net Jornada Total & Expenses strip */}
                 <div className="rounded-xl bg-[#FAF8F5] border border-[#EFECE6] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs tabular-nums">
+                  <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs tabular-nums">
+                    <div>
+                      <span className="text-[#6E6259]">Fondo de ruta: </span>
+                      {editingFondoJornadaId === selectedJornada.id ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            inputMode="decimal"
+                            value={editFondoValue}
+                            onChange={(e) => setEditFondoValue(e.target.value)}
+                            className="w-24 h-7 rounded-lg border border-[#D8D1C7] bg-white px-2 text-xs font-mono font-bold text-[#1F1A17]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveEditedFondoRuta(selectedJornada)}
+                            className="h-7 px-2 rounded-lg bg-[var(--theme-primary)] text-white text-[11px] font-semibold"
+                          >
+                            Guardar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingFondoJornadaId(null)}
+                            className="h-7 px-1.5 rounded-lg border border-[#D8D1C7] bg-white text-[#6E6259] text-[11px]"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5">
+                          <strong className="text-[#1F1A17]">
+                            {formatCurrency(selectedFondoRuta)}
+                          </strong>
+                          {selectedJornada.estado === 'Abierta' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditFondoValue(selectedFondoRuta > 0 ? String(selectedFondoRuta) : '');
+                                setEditingFondoJornadaId(selectedJornada.id);
+                              }}
+                              title="Editar fondo de ruta"
+                              className="text-[11px] font-semibold text-[var(--theme-accent)] hover:underline inline-flex items-center gap-0.5"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                              <span>Editar</span>
+                            </button>
+                          )}
+                        </span>
+                      )}
+                    </div>
                     <div>
                       <span className="text-[#6E6259]">Gastos en jornada: </span>
                       <strong className="text-[#B91C1C]">
@@ -1351,7 +1496,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                       </strong>
                     </div>
                     <div>
-                      <span className="text-[#6E6259]">Total neto jornada: </span>
+                      <span className="text-[#6E6259]">Total neto ventas: </span>
                       <strong
                         className={`text-sm ${
                           selectedTotalNetoJornada >= 0 ? 'text-emerald-700' : 'text-[#B91C1C]'
@@ -1376,11 +1521,11 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                   )}
                 </div>
 
-                {/* Cobranza breakdown strip */}
+                {/* Cobranza & Efectivo esperado breakdown strip */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-2.5 border-t border-[#F4F1EB] text-xs">
                   <div className="flex items-center gap-1.5 text-[#6E6259]">
                     <Wallet className="w-3.5 h-3.5 text-[var(--theme-primary)]" />
-                    <span>Cobranza de la jornada:</span>
+                    <span>Cobranza y efectivo en ruta:</span>
                   </div>
                   <div className="flex flex-wrap items-center gap-4 tabular-nums">
                     <span className="text-emerald-700 font-semibold">
@@ -1393,6 +1538,14 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                     >
                       Por cobrar: {formatCurrency(selectedCobranza.porCobrar)}
                     </span>
+                    {(selectedFondoRuta > 0 || selectedCobranza.cobradoEfectivo > 0) && (
+                      <span
+                        className="font-bold text-[var(--theme-primary)]"
+                        title="Fondo de ruta + Cobrado en efectivo − Gastos de jornada"
+                      >
+                        Efectivo en ruta: {formatCurrency(selectedEfectivoEsperado)}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1667,40 +1820,83 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                   </div>
                 )}
 
-              {/* Route Visit Checklist & Quick Actions */}
+              {/* Route Visit Checklist & Quick Actions (shrinks as clients are visited) */}
               <div className="rounded-2xl bg-white border border-[#E7E3DC] overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-[#EFECE6] flex flex-wrap items-center justify-between gap-2">
-                  <div>
+                  <div className="min-w-0 flex-1">
                     <h3 className="text-sm font-bold text-[#1F1A17]">
-                      Checklist de visitas · {selectedJornada.ruta} ({selectedVisitRows.length} clientes)
+                      Checklist de visitas · {selectedJornada.ruta} ({pendingVisitRows.length} pendiente{pendingVisitRows.length === 1 ? '' : 's'})
                     </h3>
-                    <p className="text-xs text-[#6E6259]">
-                      Visitados / con pedido:{' '}
-                      <strong>
-                        {selectedVisitRows.filter((r) => r.estado !== 'Pendiente').length}
-                      </strong>{' '}
-                      de {selectedVisitRows.length}
-                    </p>
+                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-[#6E6259]">
+                      <span>
+                        Visitados / con pedido:{' '}
+                        <strong className="text-emerald-700">
+                          {visitedVisitRows.length}
+                        </strong>{' '}
+                        de {selectedVisitRows.length}
+                      </span>
+                      {selectedVisitRows.length > 0 && (
+                        <div className="w-28 h-1.5 rounded-full bg-[#EFECE6] overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-600 transition-all"
+                            style={{
+                              width: `${Math.round(
+                                (visitedVisitRows.length / selectedVisitRows.length) * 100
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  {selectedVisitRows.length > 0 && (
+                  {(selectedVisitRows.length > 0 || hasUnsavedVisitDrafts) && (
                     <button
                       type="button"
                       onClick={handleSaveVisitasChecklist}
-                      className="min-h-[36px] inline-flex items-center gap-1.5 rounded-xl bg-[var(--theme-primary)] px-3 text-xs font-semibold text-white hover:bg-[var(--theme-primary-hover)]"
+                      className={`min-h-[36px] inline-flex items-center gap-1.5 rounded-xl px-3 text-xs font-semibold text-white transition-colors ${
+                        hasUnsavedVisitDrafts
+                          ? 'bg-emerald-700 hover:bg-emerald-800'
+                          : 'bg-[var(--theme-primary)] hover:bg-[var(--theme-primary-hover)]'
+                      }`}
                     >
                       <Save className="w-3.5 h-3.5" />
-                      <span>Guardar visitas</span>
+                      <span>{hasUnsavedVisitDrafts ? 'Guardar cambios' : 'Guardar visitas'}</span>
                     </button>
                   )}
                 </div>
+
+                {hasUnsavedVisitDrafts && (
+                  <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 flex items-center justify-between gap-2 text-xs text-amber-900">
+                    <span>
+                      Tienes cambios marcados en visitas sin guardar en Google Sheets.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSaveVisitasChecklist}
+                      className="font-bold underline hover:no-underline shrink-0"
+                    >
+                      Guardar ahora
+                    </button>
+                  </div>
+                )}
 
                 {selectedVisitRows.length === 0 ? (
                   <div className="p-6 text-center text-xs text-[#6E6259]">
                     No hay clientes registrados en la ruta &ldquo;{selectedJornada.ruta}&rdquo;.
                   </div>
+                ) : pendingVisitRows.length === 0 ? (
+                  <div className="p-6 text-center space-y-1.5">
+                    <CheckCircle2 className="w-7 h-7 text-emerald-600 mx-auto" />
+                    <p className="text-sm font-bold text-[#1F1A17]">
+                      ¡Todos los clientes de esta ruta ya fueron visitados!
+                    </p>
+                    <p className="text-xs text-[#6E6259]">
+                      Los clientes con compra aparecen abajo en la sección de Tickets en esta jornada.
+                    </p>
+                  </div>
                 ) : (
                   <div className="divide-y divide-[#EFECE6] max-h-[360px] overflow-y-auto">
-                    {selectedVisitRows.map(({ cliente, hasOrder, estado, notas: vNotas, draftKey }) => {
+                    {pendingVisitRows.map(({ cliente, estado, notas: vNotas, draftKey }) => {
                       const digits = sanitizePhoneDigits(cliente.telefono);
                       const inactivity = getClientInactivityInfo(cliente, dataset.tickets);
                       return (
@@ -1710,42 +1906,27 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                         >
                           <div className="min-w-0 flex-1 space-y-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              {hasOrder ? (
-                                <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[11px] font-bold text-emerald-700">
-                                  <CheckCircle2 className="w-3 h-3" />
-                                  <span>Con pedido</span>
-                                </span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setVisitDrafts((prev) => ({
-                                      ...prev,
-                                      [draftKey]: {
-                                        ...prev[draftKey],
-                                        estado: estado === 'Visitado' ? 'Pendiente' : 'Visitado',
-                                      },
-                                    }))
-                                  }
-                                  className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-bold transition-colors ${
-                                    estado === 'Visitado'
-                                      ? 'bg-blue-50 border-blue-200 text-blue-700'
-                                      : 'bg-[#FAF8F5] border-[#D8D1C7] text-[#6E6259]'
-                                  }`}
-                                >
-                                  {estado === 'Visitado' ? (
-                                    <CheckSquare className="w-3 h-3" />
-                                  ) : (
-                                    <Square className="w-3 h-3" />
-                                  )}
-                                  <span>{estado}</span>
-                                </button>
-                              )}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setVisitDrafts((prev) => ({
+                                    ...prev,
+                                    [draftKey]: {
+                                      ...prev[draftKey],
+                                      estado: 'Visitado',
+                                    },
+                                  }))
+                                }
+                                title="Marcar como visitado (se quitará del checklist)"
+                                className="inline-flex items-center gap-1 rounded-md border border-[#D8D1C7] bg-[#FAF8F5] px-2 py-0.5 text-[11px] font-bold text-[#6E6259] hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition-colors"
+                              >
+                                <Square className="w-3 h-3" />
+                                <span>{estado}</span>
+                              </button>
                               <p className="text-sm font-bold text-[#1F1A17] truncate">
                                 {cliente.nombre}
                               </p>
-                              {!hasOrder &&
-                                inactivity.isInactiveOver15Days &&
+                              {inactivity.isInactiveOver15Days &&
                                 inactivity.daysSinceLastPurchase !== null && (
                                   <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-300 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
                                     <AlertTriangle className="w-3 h-3 text-amber-700" />
@@ -1805,7 +1986,7 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                             {selectedJornada.estado === 'Abierta' && (
                               <button
                                 type="button"
-                                onClick={() => onCreateTicketInJornada(selectedJornada)}
+                                onClick={() => onCreateTicketInJornada(selectedJornada, cliente.id)}
                                 className="min-h-[34px] inline-flex items-center gap-1 rounded-lg bg-[var(--theme-tint)] px-2.5 text-xs font-semibold text-[var(--theme-primary)] hover:opacity-90"
                               >
                                 <ShoppingBag className="w-3.5 h-3.5" />
@@ -1816,6 +1997,56 @@ export const JornadasView: React.FC<JornadasViewProps> = ({
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {visitedWithoutOrderRows.length > 0 && (
+                  <div className="border-t border-[#EFECE6] bg-[#FAF8F5]">
+                    <button
+                      type="button"
+                      onClick={() => setShowVisitedWithoutOrder((v) => !v)}
+                      className="w-full px-4 py-2.5 text-left text-xs font-semibold text-[#6E6259] hover:text-[#1F1A17] flex items-center justify-between"
+                    >
+                      <span>
+                        Visitados sin pedido ({visitedWithoutOrderRows.length})
+                      </span>
+                      <span className="text-[11px] text-[var(--theme-accent)]">
+                        {showVisitedWithoutOrder ? 'Ocultar' : 'Ver / deshacer'}
+                      </span>
+                    </button>
+                    {showVisitedWithoutOrder && (
+                      <div className="divide-y divide-[#EFECE6] border-t border-[#EFECE6] bg-white">
+                        {visitedWithoutOrderRows.map(({ cliente, notas: vNotas, draftKey }) => (
+                          <div
+                            key={cliente.id}
+                            className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-semibold text-[#1F1A17]">{cliente.nombre}</span>
+                              {vNotas && (
+                                <span className="text-[#6E6259] ml-2">· {vNotas}</span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVisitDrafts((prev) => ({
+                                  ...prev,
+                                  [draftKey]: {
+                                    ...prev[draftKey],
+                                    estado: 'Pendiente',
+                                  },
+                                }))
+                              }
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#6E6259] hover:text-[var(--theme-primary)] shrink-0"
+                            >
+                              <CheckSquare className="w-3.5 h-3.5 text-blue-600" />
+                              <span>Regresar a pendientes</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
